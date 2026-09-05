@@ -1,0 +1,103 @@
+name: Release stable
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+concurrency:
+  group: release-stable
+  cancel-in-progress: false
+jobs:
+  validate:
+    uses: ./.github/workflows/ci.yml
+  release:
+    needs: validate
+    runs-on: windows-latest
+    timeout-minutes: 90
+    environment: release
+    permissions:
+      contents: read
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+      RELEASE_TAG: ${{ github.ref_name }}
+      SHIWEI_RELEASE_REPOSITORY: shihaoxuanya/shiwei-releases
+      SHIWEI_UPDATER_ENDPOINT: ${{ vars.SHIWEI_UPDATER_ENDPOINT }}
+      SHIWEI_UPDATER_PUBLIC_KEY: ${{ vars.SHIWEI_UPDATER_PUBLIC_KEY }}
+      SHIWEI_ANALYTICS_HOST: ${{ vars.SHIWEI_ANALYTICS_HOST }}
+      SHIWEI_ANALYTICS_KEY: ${{ vars.SHIWEI_ANALYTICS_KEY }}
+      SHIWEI_WINDOWS_SIGN_COMMAND: ${{ vars.SHIWEI_WINDOWS_SIGN_COMMAND }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.21'
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - run: pnpm install --frozen-lockfile
+      - run: uv sync --project services/ai-worker --frozen
+      - name: Validate tag before building
+        run: node scripts/version.mjs --check "$env:RELEASE_TAG"
+      - name: Validate public artifact repository access
+        env:
+          GH_TOKEN: ${{ secrets.SHIWEI_RELEASE_REPOSITORY_TOKEN }}
+          SHIWEI_RELEASE_PUBLISH_TOKEN: ${{ secrets.SHIWEI_RELEASE_PUBLISH_TOKEN }}
+        shell: pwsh
+        run: |
+          if (-not $env:GH_TOKEN) { throw 'Missing protected cross-repository release token' }
+          if (-not $env:SHIWEI_RELEASE_PUBLISH_TOKEN) { throw 'Missing protected READY registration token' }
+          $repo = gh api "repos/$env:SHIWEI_RELEASE_REPOSITORY" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $repo.private -ne $false -or $repo.permissions.push -ne $true) { throw 'Public artifact repository write access required' }
+      # Optional Authenticode integration point: install the certificate provider's
+      # signing client here. Never embed a PFX or password into this workflow.
+      - name: Build and sign official updater artifacts
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm build:release
+      - name: Validate worker and native startup
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-desktop.ps1
+      - run: pnpm release:artifacts
+      - name: Verify signed artifact against the public key embedded in the client
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          $file = "output/release/artifacts/Shiwei_${version}_x64-setup.exe"
+          cargo run --manifest-path apps/desktop/src-tauri/Cargo.toml --example verify-update -- "$file" "$file.sig" output/release/tauri.release.json
+          if ($LASTEXITCODE -ne 0) { throw 'Signature does not match the embedded public key' }
+      # Public artifact availability is not authorization for client rollout.
+      # Only the control plane can select a READY version for distribution.
+      - name: Upload signed assets to the public artifact repository
+        env:
+          GH_TOKEN: ${{ secrets.SHIWEI_RELEASE_REPOSITORY_TOKEN }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $artifactRoot = (Resolve-Path 'output/release/artifacts').Path
+          gh release create "$env:RELEASE_TAG" --repo "$env:SHIWEI_RELEASE_REPOSITORY" --draft --title "拾微 $env:RELEASE_TAG" --notes-file "$artifactRoot/release-notes.md"
+          if ($LASTEXITCODE -ne 0) { throw 'Draft creation failed; existing releases are never overwritten' }
+          $version = (Get-Content VERSION -Raw).Trim()
+          $files = @("Shiwei_${version}_x64-setup.exe", "Shiwei_${version}_x64-setup.exe.sig", 'SHA256SUMS.txt') | ForEach-Object { Get-Item -LiteralPath "$artifactRoot/$_" }
+          foreach ($file in $files) {
+            gh release upload "$env:RELEASE_TAG" --repo "$env:SHIWEI_RELEASE_REPOSITORY" "$($file.FullName)"
+            if ($LASTEXITCODE -ne 0) { throw 'Asset upload failed; release remains an unpublished draft' }
+          }
+          $assets = gh release view "$env:RELEASE_TAG" --repo "$env:SHIWEI_RELEASE_REPOSITORY" --json assets | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Asset verification failed' }
+          foreach ($file in $files) {
+            if (-not ($assets.assets | Where-Object { $_.name -eq $file.Name -and $_.size -eq $file.Length })) { throw 'Incomplete release asset set' }
+          }
+          gh release edit "$env:RELEASE_TAG" --repo "$env:SHIWEI_RELEASE_REPOSITORY" --draft=false --latest=false
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
+      - name: Register verified artifact as READY (never start rollout)
+        env:
+          SHIWEI_RELEASE_PUBLISH_TOKEN: ${{ secrets.SHIWEI_RELEASE_PUBLISH_TOKEN }}
+        run: node scripts/notify-release.mjs

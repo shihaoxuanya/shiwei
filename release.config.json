@@ -1,0 +1,10 @@
+{
+  "channel": "stable",
+  "sourceRepository": "shihaoxuanya/shiwei",
+  "artifactRepository": "shihaoxuanya/shiwei-releases",
+  "controlPlaneOrigin": "https://zhishimanghe.com",
+  "updaterEndpoint": "https://zhishimanghe.com/api/v1/updates/check?current_version={{current_version}}&channel=stable",
+  "updaterPublicKey": "",
+  "analyticsHost": "",
+  "analyticsKey": ""
+}

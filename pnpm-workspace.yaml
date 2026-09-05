@@ -1,0 +1,14 @@
+packages:
+  - "."
+  - "apps/*"
+  - "packages/*"
+
+nodeLinker: hoisted
+
+allowBuilds:
+  electron-winstaller: false
+  esbuild: true
+  onnxruntime-node: false
+  protobufjs: false
+  sharp: false
+  tesseract.js: false

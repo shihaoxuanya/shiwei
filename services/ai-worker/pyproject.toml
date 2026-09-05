@@ -1,0 +1,38 @@
+[project]
+name = "shiwei-ai"
+version = "0.3.0"
+description = "拾微本地知识处理与检索 Worker"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "docling>=2.48,<3",
+  "httpx>=0.28,<1",
+  "lancedb>=0.25,<1",
+  "numpy>=2,<3",
+  "onnxruntime>=1.22,<2",
+  "pydantic>=2.11,<3",
+  "platformdirs>=4.3,<5",
+  "pypdfium2>=5.13.0",
+  "jieba>=0.42.1,<0.43",
+]
+
+[dependency-groups]
+dev = [
+  "pyinstaller>=6.16,<7",
+  "pytest>=8.4,<9",
+  "reportlab>=5.0.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["shiwei_ai"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100

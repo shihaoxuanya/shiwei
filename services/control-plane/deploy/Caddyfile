@@ -1,0 +1,13 @@
+# Merge this site into the server's existing Caddy config; do not replace other sites.
+# Caddy obtains and renews the public TLS certificate. Backend is loopback-only.
+zhishimanghe.com {
+    request_body {
+        max_size 32KB
+    }
+    reverse_proxy 127.0.0.1:8920 {
+        transport http {
+            response_header_timeout 15m
+        }
+    }
+    # No access log: query strings, IPs, installation IDs and cookies are not stored.
+}

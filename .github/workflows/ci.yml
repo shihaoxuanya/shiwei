@@ -1,0 +1,65 @@
+name: Validate desktop
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_call:
+permissions:
+  contents: read
+env:
+  # Large Python sidecars share the hosted runner's disk with Rust builds.
+  # Keep assertions/tests enabled, but omit CI-only debug symbols/incremental caches.
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+jobs:
+  control-plane:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.21'
+          python-version: '3.12'
+      - run: uv sync --project services/control-plane --frozen
+      - run: uv run --project services/control-plane pytest services/control-plane/tests
+  validate:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.21'
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - run: pnpm install --frozen-lockfile
+      - run: uv sync --project services/ai-worker --frozen
+      - run: uv sync --project services/control-plane --frozen
+      - run: pnpm version:check
+      - run: pnpm secrets:scan
+      - run: pnpm test:release
+      - run: pnpm test:frontend
+      - run: pnpm test:python
+      - run: pnpm build
+      # Tauri validates the declared sidecar even for Rust tests. Build the real Worker,
+      # not a fake empty .exe, so CI also validates the distributable runtime.
+      - run: pnpm package:worker
+      - run: pnpm test:rust
+      - name: Verify official signatures in desktop and control plane
+        shell: pwsh
+        run: |
+          $env:SHIWEI_CONTROL_PYTHON = (Resolve-Path 'services/control-plane/.venv/Scripts/python.exe').Path
+          pnpm test:signing
+          if ($LASTEXITCODE -ne 0) { throw 'Signature verification failed' }
+      - run: pnpm build:desktop
+      - run: uv run --project services/ai-worker python scripts/smoke-pdf-worker.py
+      - run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-desktop.ps1

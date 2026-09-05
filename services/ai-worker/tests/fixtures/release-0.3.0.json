@@ -1,0 +1,6 @@
+{
+  "app_version": "0.3.0",
+  "schema_version": 6,
+  "schema_fixture": "schema-0.2.2.json",
+  "reason": "0.3.0 release infrastructure did not modify the local knowledge schema"
+}

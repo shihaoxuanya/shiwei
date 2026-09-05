@@ -1,0 +1,27 @@
+{
+  "name": "shiwei",
+  "version": "0.3.0",
+  "private": true,
+  "description": "拾微：你不用整理，它替你记住。",
+  "packageManager": "pnpm@11.19.0",
+  "scripts": {
+    "version": "node scripts/version.mjs",
+    "version:check": "node scripts/version.mjs --check",
+    "test:release": "node --test scripts/release.test.mjs",
+    "test:signing": "cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml --example verify-update && node scripts/test-updater-signature.mjs",
+    "release:prepare": "node scripts/prepare-release.mjs",
+    "release:artifacts": "node scripts/release-artifacts.mjs",
+    "secrets:scan": "node scripts/scan-secrets.mjs",
+    "dev": "pnpm --dir apps/desktop run tauri dev",
+    "dev:web": "pnpm --dir apps/desktop run dev",
+    "build": "pnpm --dir apps/desktop run build",
+    "build:desktop": "pnpm --dir apps/desktop run tauri build",
+    "package:worker": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-worker.ps1",
+    "build:release": "pnpm version:check && pnpm release:prepare && pnpm package:worker && pnpm --dir apps/desktop run tauri build --config ../../output/release/tauri.release.json",
+    "typecheck": "pnpm --dir apps/desktop run typecheck",
+    "test:frontend": "pnpm --dir apps/desktop run test",
+    "test:python": "uv run --project services/ai-worker pytest services/ai-worker/tests",
+    "test:rust": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml",
+    "test": "pnpm test:release && pnpm test:frontend && pnpm test:python && pnpm test:rust"
+  }
+}
