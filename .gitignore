@@ -1,0 +1,11 @@
+node_modules/
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.pfx
+*.p12
+output/
+**/.venv*/
+**/target/
