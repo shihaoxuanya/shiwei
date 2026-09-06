@@ -19,6 +19,8 @@ beforeEach(() => {
 it("uses selections and resets keys when switching vendors", async () => {
   render(<SettingsPage />);
   await screen.findByText("未配置模型");
+  expect(screen.getByText(/密钥保存在系统安全凭据存储中/)).toBeInTheDocument();
+  expect(screen.queryByText(/密钥保存在 Windows/)).not.toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("对话 API Key"), { target: { value: "secret" } });
   fireEvent.change(screen.getByLabelText("模型厂商"), { target: { value: "qwen" } });
   expect(screen.getByLabelText("对话 API Key")).toHaveValue("");

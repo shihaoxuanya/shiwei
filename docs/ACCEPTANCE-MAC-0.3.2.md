@@ -41,6 +41,8 @@
 
 因此无法分配 macOS runner；最近已有运行均为 `startup_failure`。未修改 GitHub 计费、未购买资源、未使用公开库托管私有源码以规避阻塞。
 
+适配源码及工作流已推送私有仓库。首次适配提交 `4c0fdfc49c2a86df8ac773f7ef094fd8e94b20af` 触发的检查运行 `34041610530` 同样启动失败。浏览器已确认 `Mac Apple Silicon test build` 出现在工作流列表，但计费锁定状态下无法启动，Mac 工作流运行数仍为 0。
+
 - **尚未生成 DMG，无 Mac 下载链接与文件校验值。**
 - Mac 原生依赖安装、PyInstaller、Tauri 构建、Swift 窗口探针、最终 App 签名校验、Mac 钥匙串与 DMG smoke：代码已准备，尚未实际执行。
 - 测试用户从浏览器下载后的 Gatekeeper 授权、Finder 定位、中文输入与来源侧栏操作：待真机验证。

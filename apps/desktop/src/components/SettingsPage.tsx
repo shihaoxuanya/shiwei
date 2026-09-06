@@ -145,7 +145,7 @@ export function SettingsPage() {
         {provider.embeddingMode !== "none" && <Button variant="ghost" disabled={!!busy || !ready || !desktop} onClick={() => void run("index")}>{busy === "index" ? "正在建立索引…" : "保存并重建语义索引"}</Button>}
       </div>
       <p className="text-xs leading-5 text-muted">预设不代表账户已开通该模型，可从服务商刷新或选择自定义 ID。测试连接会发送极少量测试文本，可能消耗少量额度。</p>
-      <div className="flex items-start gap-2 border-t border-line pt-5 text-xs leading-6 text-muted"><ShieldCheck className="mt-1 size-4 shrink-0 text-indigo" /><span>密钥保存在 Windows 凭据管理器中，不写入配置文件。拾微没有云账号；模型请求直接发往你选择的服务商。</span></div>
+      <div className="flex items-start gap-2 border-t border-line pt-5 text-xs leading-6 text-muted"><ShieldCheck className="mt-1 size-4 shrink-0 text-indigo" /><span>密钥保存在系统安全凭据存储中，不写入配置文件。拾微没有云账号；模型请求直接发往你选择的服务商。</span></div>
       <details className="text-xs text-muted"><summary className="cursor-pointer">开发者信息</summary><div className="mt-3 grid grid-cols-2 gap-4 pb-2"><p>本地知识片段 <span className="ml-2 text-ink">{indexInfo.chunkCount}</span></p><p className="break-all">当前语义索引 <span className="ml-2 text-ink">{indexInfo.needsRebuild ? "需更新，当前使用本地全文检索" : indexInfo.model ?? "尚未建立"}</span></p></div></details>
     </form>
     <ReleaseSettings />

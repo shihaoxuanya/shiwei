@@ -26,7 +26,7 @@ export function CopyButton({
         }
       }}
       aria-label={label}
-      title={state === "error" ? "复制失败，请选中文字后按 Ctrl+C" : label}
+      title={state === "error" ? "复制失败，请选中文字后使用系统复制快捷键" : label}
     >
       {state === "copied" ? <Check size={14} /> : <Copy size={14} />}
       <span role="status">
