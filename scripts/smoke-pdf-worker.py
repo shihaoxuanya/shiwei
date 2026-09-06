@@ -19,7 +19,8 @@ def main() -> None:
     parser.add_argument("--worker", type=Path)
     parser.add_argument("--evidence", type=Path)
     args = parser.parse_args()
-    command = [str(args.worker.resolve())] if args.worker else [str(ROOT / "services/ai-worker/.venv/Scripts/python.exe"), "-m", "shiwei_ai.worker.main"]
+    python_relative = "Scripts/python.exe" if sys.platform == "win32" else "bin/python"
+    command = [str(args.worker.resolve())] if args.worker else [str(ROOT / "services/ai-worker/.venv" / python_relative), "-m", "shiwei_ai.worker.main"]
     with tempfile.TemporaryDirectory(prefix="shiwei-pdf-smoke-") as temporary:
         directory = Path(temporary)
         text_pdf, scan_pdf = directory / "恢复记录.PDF", directory / "扫描案例.pdf"

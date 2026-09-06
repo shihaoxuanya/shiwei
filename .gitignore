@@ -10,6 +10,7 @@ services/control-plane/.venv-*/
 services/ai-worker/build/
 apps/desktop/src-tauri/binaries/_internal/
 apps/desktop/src-tauri/binaries/*-pc-windows-msvc.exe
+apps/desktop/src-tauri/binaries/macos/
 __pycache__/
 .pytest_cache/
 .playwright-cli/

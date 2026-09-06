@@ -1,0 +1,18 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "plugins": {
+    "updater": { "pubkey": "", "endpoints": [] }
+  },
+  "bundle": {
+    "targets": ["app", "dmg"],
+    "icon": ["icons/icon.icns"],
+    "externalBin": ["binaries/macos/shiwei-ai-worker"],
+    "resources": null,
+    "macOS": {
+      "minimumSystemVersion": "14.0",
+      "signingIdentity": "-",
+      "hardenedRuntime": false,
+      "files": { "MacOS/_internal": "binaries/macos/_internal" }
+    }
+  }
+}

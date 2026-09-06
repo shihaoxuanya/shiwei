@@ -3,7 +3,7 @@ import { join, relative, extname } from 'node:path';
 import { root } from './version.mjs';
 // Scan source, workflows, docs, fixtures and configs, including hidden files. Never print matches.
 const ignored = new Set(['.git', '.playwright-cli', 'node_modules', 'target', '.venv', 'build', 'dist', 'output', 'out', '__pycache__', '.pytest_cache', 'binaries']);
-const textExtensions = new Set(['.ts', '.tsx', '.js', '.mjs', '.json', '.py', '.rs', '.toml', '.md', '.yml', '.yaml', '.ps1', '.sh', '.txt', '.sql', '.env', '.example']);
+const textExtensions = new Set(['.ts', '.tsx', '.js', '.mjs', '.json', '.py', '.rs', '.swift', '.toml', '.md', '.yml', '.yaml', '.ps1', '.sh', '.txt', '.sql', '.env', '.example']);
 const patterns = [
   /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,
   /(?:sk-(?:proj-)?[A-Za-z0-9_-]{24,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|phx_[A-Za-z0-9]{24,})/,

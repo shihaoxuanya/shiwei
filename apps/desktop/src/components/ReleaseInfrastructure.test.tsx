@@ -33,6 +33,15 @@ it("keeps the opt-out control immediately reachable", async () => {
   fireEvent.click(screen.getByRole("switch", { name: "帮助改进拾微" }));
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("analytics_consent", { enabled: false }));
 });
+it("loads the native new-install default as checked without fabricating consent in the UI", async () => {
+  vi.mocked(invoke).mockImplementation(async (command) => command === "release_status"
+    ? { ...useReleaseStore.getState().status, analytics: { enabled: true, configured: true } }
+    : undefined);
+  render(<ReleaseSettings />);
+  await waitFor(() => expect(screen.getByRole("switch", { name: "帮助改进拾微" })).toBeChecked());
+  expect(screen.getByText(/新安装默认开启/)).toBeInTheDocument();
+  expect(invoke).not.toHaveBeenCalledWith("analytics_consent", expect.anything());
+});
 it("signature failures offer retry, never a bypass installation", () => {
   useReleaseStore.setState({ visible: true, update: { ...initialUpdate, phase: "error", error: "update_signature" } });
   render(<ReleaseInfrastructure flushNotes={async () => {}} />);

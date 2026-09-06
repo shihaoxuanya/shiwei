@@ -221,52 +221,15 @@ impl Drop for WorkerClient {
 
 fn spawn_worker() -> Result<WorkerProcess, WorkerError> {
     let worker_project = worker_project_dir_from(Path::new(env!("CARGO_MANIFEST_DIR")));
-    let development_python = worker_project
-        .join(".venv")
-        .join("Scripts")
-        .join("python.exe");
-    let installed_sidecar = env::current_exe().ok().and_then(|path| {
-        path.parent()
-            .map(|parent| parent.join("shiwei-ai-worker.exe"))
-    });
-    let mut command = if cfg!(debug_assertions) && development_python.is_file() {
-        Command::new(&development_python)
-    } else if let Some(sidecar) = installed_sidecar.filter(|path| path.is_file()) {
-        Command::new(sidecar)
-    } else if development_python.is_file() {
-        Command::new(development_python)
-    } else {
-        let executable = find_uv().ok_or(WorkerError::ExecutableNotFound)?;
-        let mut command = Command::new(executable);
-        command
-            .args(["run", "--project"])
-            .arg(&worker_project)
-            .arg("python");
-        command
-    };
-    if command
-        .get_program()
-        .to_string_lossy()
-        .ends_with("python.exe")
-        || command.get_program().to_string_lossy().ends_with("uv.exe")
-        || command.get_program() == "uv"
-    {
-        command.args(["-m", "shiwei_ai.worker.main"]);
-    }
-    let working_directory = if worker_project.is_dir() {
-        worker_project
-    } else {
-        env::current_exe()
-            .ok()
-            .and_then(|path| path.parent().map(Path::to_path_buf))
-            .ok_or(WorkerError::ExecutableNotFound)?
-    };
-    let mut child = command
-        .current_dir(working_directory)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    let executable = env::current_exe()?;
+    let mut command = worker_command(
+        &worker_project,
+        &executable,
+        cfg!(debug_assertions),
+        cfg!(windows),
+    )?;
+    configure_worker_process(&mut command);
+    let mut child = command.spawn()?;
 
     let stdin = child.stdin.take().ok_or(WorkerError::Exited)?;
     let stdout = child.stdout.take().ok_or(WorkerError::Exited)?;
@@ -296,6 +259,74 @@ fn spawn_worker() -> Result<WorkerProcess, WorkerError> {
         stdin,
         responses,
     })
+}
+
+fn development_python_path(project: &Path, windows: bool) -> PathBuf {
+    project.join(".venv").join(if windows {
+        "Scripts/python.exe"
+    } else {
+        "bin/python"
+    })
+}
+
+fn sidecar_path(executable: &Path, windows: bool) -> Result<PathBuf, WorkerError> {
+    Ok(executable
+        .parent()
+        .ok_or(WorkerError::ExecutableNotFound)?
+        .join(if windows {
+            "shiwei-ai-worker.exe"
+        } else {
+            "shiwei-ai-worker"
+        }))
+}
+
+fn worker_command(
+    project: &Path,
+    executable: &Path,
+    development: bool,
+    windows: bool,
+) -> Result<Command, WorkerError> {
+    let python = development_python_path(project, windows);
+    let sidecar = sidecar_path(executable, windows)?;
+    if development && python.is_file() {
+        let mut command = Command::new(python);
+        command
+            .args(["-m", "shiwei_ai.worker.main"])
+            .current_dir(project);
+        return Ok(command);
+    }
+    if sidecar.is_file() {
+        let mut command = Command::new(&sidecar);
+        command.current_dir(sidecar.parent().ok_or(WorkerError::ExecutableNotFound)?);
+        return Ok(command);
+    }
+    // Never download/run a development environment on a tester's computer.
+    if !development || !project.is_dir() {
+        return Err(WorkerError::ExecutableNotFound);
+    }
+    let mut command = Command::new(find_uv().ok_or(WorkerError::ExecutableNotFound)?);
+    command
+        .args(["run", "--project"])
+        .arg(project)
+        .args(["python", "-m", "shiwei_ai.worker.main"])
+        .current_dir(project);
+    Ok(command)
+}
+
+fn configure_worker_process(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // The worker still needs stdin/stdout for JSONL. A windowless PyInstaller
+        // build can remove those streams; suppress the console at process creation
+        // instead, including the development Python and uv fallback paths.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 }
 
 fn parse_response<T: DeserializeOwned>(raw: &str, expected_id: &str) -> Result<T, WorkerError> {
@@ -356,6 +387,10 @@ fn find_uv() -> Option<PathBuf> {
                 .join("uv.exe"),
         );
     }
+    #[cfg(unix)]
+    if let Ok(user_home) = env::var("HOME") {
+        candidates.push(PathBuf::from(user_home).join(".local/bin/uv"));
+    }
 
     candidates
         .into_iter()
@@ -378,6 +413,68 @@ mod tests {
         let root = Path::new("repo");
         let path = worker_project_dir_from(&root.join("apps/desktop/src-tauri"));
         assert!(path.ends_with("services/ai-worker"));
+    }
+
+    #[test]
+    fn resolves_mac_and_windows_worker_layouts() {
+        let project = Path::new("repo/services/ai-worker");
+        assert!(development_python_path(project, true).ends_with(".venv/Scripts/python.exe"));
+        assert!(development_python_path(project, false).ends_with(".venv/bin/python"));
+        assert_eq!(
+            sidecar_path(Path::new("拾微.app/Contents/MacOS/shiwei-desktop"), false).unwrap(),
+            PathBuf::from("拾微.app/Contents/MacOS/shiwei-ai-worker")
+        );
+        assert!(
+            sidecar_path(Path::new("installed/shiwei-desktop.exe"), true)
+                .unwrap()
+                .ends_with("shiwei-ai-worker.exe")
+        );
+    }
+
+    #[test]
+    fn release_never_falls_back_to_development_python_or_uv() {
+        let temp = tempfile::tempdir().unwrap();
+        for windows in [true, false] {
+            let python = development_python_path(temp.path(), windows);
+            std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+            std::fs::write(&python, b"fixture").unwrap();
+            assert!(matches!(
+                worker_command(temp.path(), &temp.path().join("app"), false, windows),
+                Err(WorkerError::ExecutableNotFound)
+            ));
+        }
+    }
+
+    #[test]
+    fn packaged_worker_is_launched_without_python_arguments() {
+        let temp = tempfile::tempdir().unwrap();
+        for windows in [true, false] {
+            let app = temp.path().join("拾微.app/Contents/MacOS/app");
+            let sidecar = sidecar_path(&app, windows).unwrap();
+            std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+            std::fs::write(&sidecar, b"fixture").unwrap();
+            let command = worker_command(temp.path(), &app, false, windows).unwrap();
+            assert_eq!(command.get_program(), sidecar.as_os_str());
+            assert_eq!(command.get_args().count(), 0);
+            assert_eq!(command.get_current_dir(), sidecar.parent());
+        }
+    }
+
+    #[test]
+    fn development_python_keeps_explicit_module_arguments_on_both_platforms() {
+        let temp = tempfile::tempdir().unwrap();
+        for windows in [true, false] {
+            let python = development_python_path(temp.path(), windows);
+            std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+            std::fs::write(&python, b"fixture").unwrap();
+            let command =
+                worker_command(temp.path(), &temp.path().join("app"), true, windows).unwrap();
+            assert_eq!(command.get_program(), python.as_os_str());
+            assert_eq!(
+                command.get_args().collect::<Vec<_>>(),
+                ["-m", "shiwei_ai.worker.main"]
+            );
+        }
     }
 
     #[test]
@@ -441,5 +538,55 @@ mod tests {
         let client = WorkerClient::new();
         let result: Ping = client.ping().expect("Python Worker should answer ping");
         assert_eq!(result.status, "pong");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn background_worker_child_probe() {
+        if env::var("SHIWEI_TEST_CONSOLE_PROBE").as_deref() != Ok("1") {
+            return;
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetConsoleWindow() -> *mut std::ffi::c_void;
+        }
+        assert!(
+            unsafe { GetConsoleWindow() }.is_null(),
+            "Worker must not own or inherit a console"
+        );
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).unwrap();
+        assert_eq!(line.trim(), "pipe-request");
+        println!("pipe-response");
+        eprintln!("pipe-diagnostic");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn background_worker_has_no_console_and_keeps_all_protocol_pipes() {
+        let mut command = Command::new(env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "worker_client::tests::background_worker_child_probe",
+                "--nocapture",
+            ])
+            .env("SHIWEI_TEST_CONSOLE_PROBE", "1");
+        configure_worker_process(&mut command);
+        let mut child = command.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"pipe-request\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("pipe-response"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("pipe-diagnostic"));
     }
 }

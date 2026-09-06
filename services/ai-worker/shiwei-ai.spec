@@ -39,7 +39,10 @@ executable = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
+    # Keep JSONL stdio on both platforms (never --windowed / pythonw). Windows
+    # Rust uses CREATE_NO_WINDOW; macOS starts the bundled binary with pipes.
     console=True,
+    contents_directory="_internal",
 )
 bundle = COLLECT(
     executable,
@@ -48,5 +51,4 @@ bundle = COLLECT(
     strip=False,
     upx=False,
     name="shiwei-ai-worker",
-    contents_directory="shiwei-ai-runtime",
 )

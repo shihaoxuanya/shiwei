@@ -1,0 +1,119 @@
+name: Mac Apple Silicon test build
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish verified DMG to the public installer repository as a pre-release'
+        required: true
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: mac-test-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 90
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: '2'
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
+      SHIWEI_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify native build host
+        run: |
+          test "$(uname -m)" = arm64
+          test "$(sw_vers -productVersion | cut -d. -f1)" = 14
+          sw_vers
+          df -h .
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.21'
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - run: pnpm install --frozen-lockfile
+      - run: uv sync --project services/ai-worker --frozen
+      - run: pnpm version:check && pnpm secrets:scan
+      - run: pnpm test:release && pnpm test:frontend && pnpm typecheck
+      - run: pnpm test:python
+      - run: pnpm package:worker:mac
+      # Tauri requires the real target sidecar at compile time, including Rust tests.
+      - run: pnpm test:rust
+      - run: node scripts/macos-build.mjs app
+      - name: Test the app copied out of the actual DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          images=(apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg)
+          test "${#images[@]}" = 1
+          uv run --project services/ai-worker --frozen python scripts/smoke-macos.py --dmg "${images[0]}" --evidence output/mac-test-evidence
+      - run: node scripts/macos-build.mjs artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-test-installers
+          path: output/mac-test/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mac-test-evidence
+          path: output/mac-test-evidence/
+          if-no-files-found: ignore
+          retention-days: 14
+  publish:
+    if: inputs.publish
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    env:
+      SHIWEI_RELEASE_REPOSITORY: shihaoxuanya/shiwei-releases
+    steps:
+      # This job receives only allowlisted artifacts, never checks out private source.
+      - uses: actions/download-artifact@v4
+        with:
+          name: mac-test-installers
+          path: artifacts
+      - name: Publish immutable Mac pre-release (no stable rollout)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.SHIWEI_RELEASE_REPOSITORY_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN"
+          test "$(gh api "repos/$SHIWEI_RELEASE_REPOSITORY" --jq '.private == false and .permissions.push == true')" = true
+          shopt -s nullglob
+          directories=(artifacts/mac-test-v*)
+          test "${#directories[@]}" = 1
+          cd "${directories[0]}"
+          tag="$(basename "$PWD")"
+          [[ "$tag" =~ ^mac-test-v[0-9]+\.[0-9]+\.[0-9]+-[a-f0-9]{12}$ ]]
+          images=(Shiwei_*_macos_arm64_test_*.dmg)
+          test "${#images[@]}" = 1
+          test "$(find . -type f | wc -l | tr -d ' ')" = 4
+          test -f SHA256SUMS.txt && test -f MAC-TEST.md && test -f release-notes.md
+          sha256sum --strict -c SHA256SUMS.txt
+          gh release create "$tag" --repo "$SHIWEI_RELEASE_REPOSITORY" --draft --prerelease --title "拾微 Mac 内测 $tag" --notes-file release-notes.md
+          gh release upload "$tag" --repo "$SHIWEI_RELEASE_REPOSITORY" "${images[0]}" SHA256SUMS.txt MAC-TEST.md
+          for file in "${images[0]}" SHA256SUMS.txt MAC-TEST.md; do
+            size="$(stat -c %s "$file")"
+            gh release view "$tag" --repo "$SHIWEI_RELEASE_REPOSITORY" --json assets | jq -e --arg name "$file" --argjson size "$size" '.assets | any(.name == $name and .size == $size)' > /dev/null
+          done
+          gh release edit "$tag" --repo "$SHIWEI_RELEASE_REPOSITORY" --draft=false --prerelease --latest=false

@@ -556,6 +556,39 @@ mod tests {
         );
     }
     #[test]
+    fn release_default_is_checked_across_restarts_until_explicitly_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installation.json");
+        for _ in 0..2 {
+            let service = AnalyticsService::new_with_default(
+                path.clone(),
+                "https://example.invalid",
+                "",
+                true,
+            );
+            assert!(service.status().enabled);
+            assert_eq!(
+                serde_json::from_slice::<Value>(&fs::read(&path).unwrap()).unwrap()["enabled"],
+                true
+            );
+        }
+        let service =
+            AnalyticsService::new_with_default(path.clone(), "https://example.invalid", "", true);
+        service.set_enabled(false).unwrap();
+        for _ in 0..2 {
+            assert!(
+                !AnalyticsService::new_with_default(
+                    path.clone(),
+                    "https://example.invalid",
+                    "",
+                    true
+                )
+                .status()
+                .enabled
+            );
+        }
+    }
+    #[test]
     fn first_party_envelope_has_only_allowlisted_metadata_and_random_event_ids() {
         let dir = tempfile::tempdir().unwrap();
         let captured = Arc::new(Mutex::new(Vec::<Value>::new()));

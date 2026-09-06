@@ -1,6 +1,6 @@
 [package]
 name = "shiwei-desktop"
-version = "0.3.1"
+version = "0.3.2"
 description = "拾微个人 AI 记忆工具"
 authors = ["拾微"]
 edition = "2021"

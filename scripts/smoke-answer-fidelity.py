@@ -4,6 +4,7 @@ No user credentials/configuration or external model is used. A temporary test CA
 is trusted only by this child Worker; production HTTPS verification stays on.
 """
 import argparse
+import shutil
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -20,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--worker', type=Path, required=True)
-    parser.add_argument('--openssl', type=Path, default=Path('C:/Program Files/Git/usr/bin/openssl.exe'))
+    parser.add_argument('--openssl', type=Path, default=Path(shutil.which('openssl') or 'C:/Program Files/Git/usr/bin/openssl.exe'))
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix='shiwei-fidelity-smoke-') as temporary:
         directory = Path(temporary)

@@ -2,6 +2,18 @@ param([string]$Executable = "apps/desktop/src-tauri/target/release/shiwei-deskto
 $ErrorActionPreference = "Stop"
 $taskRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $taskExe = (Resolve-Path (Join-Path $taskRoot $Executable)).Path
+# Verify the linked PE subsystem, not just a hidden launcher's appearance.
+$taskReader = New-Object System.IO.BinaryReader([System.IO.File]::OpenRead($taskExe))
+try {
+  if ($taskReader.ReadUInt16() -ne 0x5A4D) { throw 'Not a Windows executable' }
+  $taskReader.BaseStream.Position = 0x3C
+  $taskPeOffset = $taskReader.ReadInt32()
+  $taskReader.BaseStream.Position = $taskPeOffset
+  if ($taskReader.ReadUInt32() -ne 0x4550) { throw 'Invalid PE header' }
+  $taskReader.BaseStream.Position = $taskPeOffset + 24 + 68
+  $taskSubsystem = $taskReader.ReadUInt16()
+  if ($taskSubsystem -ne 2) { throw 'Release must use Windows GUI subsystem (2), not console subsystem (3)' }
+} finally { $taskReader.Dispose() }
 $expectedVersion = (Get-Content -LiteralPath (Join-Path $taskRoot 'VERSION') -Raw).Trim()
 $taskSandbox = Join-Path $taskRoot ("output\qa-release\desktop-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $taskSandbox | Out-Null
@@ -32,10 +44,20 @@ try {
   if ($taskChildren.Name -notcontains "shiwei-ai-worker.exe") { throw "Packaged worker was not started" }
   $taskWorker = $taskChildren | Where-Object Name -eq "shiwei-ai-worker.exe" | Select-Object -First 1
   if ($taskWorker.ExecutablePath -ne (Join-Path (Split-Path $taskExe) "shiwei-ai-worker.exe")) { throw "Wrong worker executable" }
+  # The helper checks console attachment for the actual desktop AND packaged
+  # worker. WindowStyle Hidden alone would let the original defect pass.
+  $taskProbe = Join-Path $PSScriptRoot 'assert-no-console.ps1'
+  $taskProbeReport = Join-Path $taskSandbox 'console-probe.json'
+  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $taskProbe -ProcessIds "$($taskProcess.Id),$($taskWorker.ProcessId)" -ReportPath $taskProbeReport
+  if ($LASTEXITCODE -ne 0) {
+    if (Test-Path -LiteralPath $taskProbeReport) { Get-Content -LiteralPath $taskProbeReport }
+    throw 'Desktop/worker console verification failed'
+  }
   $taskVersion = (Get-Item -LiteralPath $taskExe).VersionInfo
   if ($taskVersion.ProductVersion -ne $expectedVersion) { throw "Wrong desktop version" }
   [ordered]@{
     status = "passed"; productVersion = $taskVersion.ProductVersion
+    peSubsystem = 'Windows GUI'; desktopHasConsoleWindow = $false; workerHasConsoleWindow = $false
     windowTitle = $taskProcess.MainWindowTitle; responding = $taskProcess.Responding
     packagedWorkerStarted = $true; isolatedDataDirectory = $true
     webViewStarted = [bool]($taskChildren.Name -contains "msedgewebview2.exe")

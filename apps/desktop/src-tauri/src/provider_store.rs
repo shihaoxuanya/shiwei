@@ -229,12 +229,34 @@ fn entry(name: &str) -> Result<Entry, String> {
     Entry::new(SERVICE, name).map_err(keyring_error)
 }
 fn keyring_error(error: keyring::Error) -> String {
-    format!("无法访问 Windows 凭据管理器：{error}")
+    let store = if cfg!(target_os = "macos") {
+        "macOS 钥匙串"
+    } else if cfg!(windows) {
+        "Windows 凭据管理器"
+    } else {
+        "系统凭据存储"
+    };
+    format!("无法访问{store}：{error}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_keychain_round_trip_uses_only_a_disposable_test_entry() {
+        let name = format!("mac-test-{}", uuid::Uuid::new_v4());
+        let credential = Entry::new("com.shiwei.desktop.qa", &name).unwrap();
+        credential.set_password("synthetic-test-value").unwrap();
+        let value = credential.get_password();
+        let cleanup = credential.delete_credential();
+        assert_eq!(value.unwrap(), "synthetic-test-value");
+        cleanup.unwrap();
+        assert!(matches!(
+            credential.get_password(),
+            Err(keyring::Error::NoEntry)
+        ));
+    }
     fn legacy() -> ProviderPublicConfig {
         serde_json::from_value(serde_json::json!({"baseUrl":"https://api.example.com/v1","chatModel":"chat","embeddingModel":"embed"})).unwrap()
     }
