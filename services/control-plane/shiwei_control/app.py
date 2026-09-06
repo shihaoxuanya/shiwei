@@ -1,11 +1,14 @@
-"""Release-only control plane; never opens the local knowledge database."""
+"""Release and metadata control plane; never opens the local knowledge database."""
+import asyncio
 import hashlib
 import os
 import re
 import secrets
+import sqlite3
 import threading
 import time
 from collections import OrderedDict
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -17,6 +20,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .artifacts import GitHubReleaseProvider
+from .analytics import Analytics, Event
 from .models import Action, Artifact, Draft, Login
 from .releases import Releases, find
 from .storage import Store, now
@@ -39,6 +43,7 @@ class Settings:
     public_key: str = ""
     development: bool = False
     analytics_dashboard: str = ""
+    analytics_salt: str = ""
 
     def __post_init__(self):
         url = urlsplit(self.origin)
@@ -48,6 +53,8 @@ class Settings:
         if (url.scheme != "https" and not local) or not url.hostname or url.path not in ("", "/") or url.query or url.fragment or url.username or url.password:
             raise ValueError("需配置 HTTPS Origin；仅显式本地开发允许 HTTP")
         self.origin = self.origin.rstrip("/")
+        if self.analytics_salt and (len(self.analytics_salt) < 32 or len(self.analytics_salt) > 256):
+            raise ValueError("统计标识加密盐至少需要 32 字符")
         if self.release_token_hash and not re.fullmatch(r"[a-f0-9]{64}", self.release_token_hash):
             raise ValueError("发布令牌配置必须为 SHA256")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9][A-Za-z0-9_.-]*", self.repository):
@@ -65,7 +72,8 @@ class Settings:
                    os.environ.get("SHIWEI_RELEASE_REPOSITORY", "shihaoxuanya/shiwei-releases"),
                    os.environ.get("SHIWEI_UPDATER_PUBLIC_KEY", ""),
                    os.environ.get("SHIWEI_CONTROL_DEV") == "1",
-                   os.environ.get("SHIWEI_ANALYTICS_DASHBOARD", ""))
+                   os.environ.get("SHIWEI_ANALYTICS_DASHBOARD", ""),
+                   os.environ.get("SHIWEI_ANALYTICS_SALT", ""))
 
 
 class Limiter:
@@ -88,10 +96,32 @@ class Limiter:
 def create_app(settings=None, provider=None):
     settings = settings or Settings.environment()
     store = Store(settings.database)
+    try:
+        analytics = Analytics(settings.database.with_name(settings.database.stem + "-analytics.db"), settings.analytics_salt)
+    except (sqlite3.Error, OSError, RuntimeError):
+        # Telemetry outages must not take authentication or signed update checks down.
+        analytics = None
     releases = Releases(store, provider or GitHubReleaseProvider(settings.repository, settings.public_key))
     limiter, verifying, hashing = Limiter(), threading.BoundedSemaphore(1), threading.BoundedSemaphore(2)
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, debug=False)
+    @asynccontextmanager
+    async def lifespan(app):
+        async def retention():
+            while True:
+                await asyncio.sleep(3600)
+                if analytics is not None:
+                    with suppress(sqlite3.Error, OSError):
+                        await asyncio.to_thread(analytics.prune)
+        cleanup = asyncio.create_task(retention())
+        try:
+            yield
+        finally:
+            cleanup.cancel()
+            with suppress(asyncio.CancelledError):
+                await cleanup
+
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, debug=False, lifespan=lifespan)
     app.state.store, app.state.releases = store, releases
+    app.state.analytics = analytics
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlsplit(settings.origin).hostname])
     cookie = "shiwei_session" if settings.development else "__Host-shiwei_session"
 
@@ -100,14 +130,19 @@ def create_app(settings=None, provider=None):
         if not settings.development and request.url.scheme != "https":
             return JSONResponse({"detail": "仅支持 HTTPS"}, status_code=400)
         key = digest(request.client.host if request.client else "unknown")
-        if not limiter.allow("ip:" + key, 120, 60):
+        telemetry = request.url.path == "/api/v1/telemetry/events"
+        if not limiter.allow(("telemetry-ip:" if telemetry else "ip:") + key, 600 if telemetry else 120, 60):
             return JSONResponse({"detail": "请求过于频繁"}, 429, headers={"Retry-After": "60"})
         if request.method not in ("GET", "HEAD"):
             body = bytearray()
-            async for part in request.stream():
-                body.extend(part)
-                if len(body) > 32768:
-                    return JSONResponse({"detail": "请求过大"}, 413)
+            try:
+                async with asyncio.timeout(5):
+                    async for part in request.stream():
+                        body.extend(part)
+                        if len(body) > (4096 if telemetry else 32768):
+                            return JSONResponse({"detail": "请求过大"}, 413)
+            except TimeoutError:
+                return JSONResponse({"detail": "请求超时"}, 408)
             request._body = bytes(body)
         try:
             response = await call_next(request)
@@ -152,6 +187,27 @@ def create_app(settings=None, provider=None):
     @app.get("/healthz")
     def health():
         return {"status": "ok"}
+
+    @app.post("/api/v1/telemetry/events", status_code=204)
+    def collect(data: Event, request: Request):
+        # Native-only transport, never browser autocapture. The public endpoint is NOT
+        # an authentication credential: stats are best-effort observations, not billing.
+        if request.headers.get("origin") or request.headers.get("cookie"):
+            raise HTTPException(403, "仅接收桌面统计事件")
+        if request.headers.get("content-type", "").split(";")[0] != "application/json":
+            raise HTTPException(415, "仅支持 JSON")
+        if not limiter.allow("telemetry-global", 1200, 60):
+            raise HTTPException(429, "统计服务繁忙")
+        if analytics is None:
+            raise HTTPException(503, "统计数据库暂不可用；版本服务不受影响")
+        analytics.ingest(data)
+        return Response(status_code=204)
+
+    @admin.get("/metrics")
+    def metrics(days: int = 7):
+        if analytics is None:
+            raise HTTPException(503, "统计数据库暂不可用；版本服务不受影响")
+        return {**analytics.summary(days), "development": settings.development}
 
     @app.post("/api/auth/login")
     def login(data: Login, request: Request, response: Response):
@@ -242,7 +298,7 @@ def create_app(settings=None, provider=None):
 
     @app.get("/admin/static/{name}")
     def asset(name: str):
-        types = {"app.js": "text/javascript", "style.css": "text/css"}
+        types = {"app.js": "text/javascript", "metrics.js": "text/javascript", "style.css": "text/css"}
         if name not in types:
             raise HTTPException(404)
         return Response((STATIC / name).read_text(encoding="utf-8"), media_type=types[name])

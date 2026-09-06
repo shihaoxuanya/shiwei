@@ -10,12 +10,28 @@ beforeEach(() => {
   useReleaseStore.setState({ update: initialUpdate, visible: false, privacyError: "", status: { version: "0.3.0", channel: "stable", updaterConfigured: false, analytics: { enabled: false, configured: false } } });
   vi.mocked(invoke).mockImplementation(async (command) => command === "release_status" ? useReleaseStore.getState().status : undefined);
 });
-it("shows version and default-off privacy with honest unconfigured status", async () => {
+it("shows an existing disabled preference and honest unconfigured status", async () => {
   render(<ReleaseSettings />);
   expect(screen.getByRole("switch", { name: "帮助改进拾微" })).not.toBeChecked();
   expect(screen.getByText("版本 0.3.0")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "检查更新" })).toBeDisabled();
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("release_status"));
+});
+it("shows the saved enabled state with disclosure, without a consent dialog", async () => {
+  useReleaseStore.setState({ status: { version: "0.3.1", channel: "stable", updaterConfigured: false, analytics: { enabled: true, configured: true } } });
+  render(<ReleaseSettings />);
+  expect(screen.getByRole("switch", { name: "帮助改进拾微" })).toBeChecked();
+  expect(screen.getByText(/随机安装标识/)).toBeInTheDocument();
+  expect(screen.getByText(/更新会保留已有选择/)).toBeInTheDocument();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("release_status"));
+  expect(invoke).not.toHaveBeenCalledWith("analytics_consent", expect.anything());
+});
+it("keeps the opt-out control immediately reachable", async () => {
+  useReleaseStore.setState({ status: { version: "0.3.1", channel: "stable", updaterConfigured: false, analytics: { enabled: true, configured: true } } });
+  render(<ReleaseSettings />);
+  fireEvent.click(screen.getByRole("switch", { name: "帮助改进拾微" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("analytics_consent", { enabled: false }));
 });
 it("signature failures offer retry, never a bypass installation", () => {
   useReleaseStore.setState({ visible: true, update: { ...initialUpdate, phase: "error", error: "update_signature" } });

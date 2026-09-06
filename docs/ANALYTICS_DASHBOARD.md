@@ -1,38 +1,33 @@
-# PostHog 早期产品指标
+# 拾微管理后台：数据概览
 
-当前不开发自有管理后台，也没有自动创建远程 Dashboard；维护者在自己的 PostHog 项目创建以下图表。统一标注 **Installations / 同意参与统计的安装实例**，不要标成 Registered Users 或全部用户。
+后台 /admin 包含「数据概览」和「版本管理」。统计来自自有采集接口和独立 SQLite 汇总，不是 PostHog 链接或假数据卡片。沿用管理员认证，无公开查看统计接口。
 
-## 图表
+可选最近 7／30 天（含今天），按北京时间分日；页面可见时每 60 秒刷新，也可手动刷新。每次汇总共享一致数据库快照。
 
-| 指标 | 定义 |
+| 指标 | 口径 |
 | --- | --- |
-| Observed Installations | `app_installed` 的唯一 distinct_id；仅覆盖首次同意后成功上报的实例 |
-| DAU / WAU / MAU | `app_opened` 按日/周/月窗口统计唯一 distinct_id，客户端不计算 |
-| 版本分布 / Update Adoption | 活跃实例最近的 `app_version` 属性；不是简单累加历史版本事件 |
-| First Import Conversion | opened → 首次有 `success_count > 0` 的 import_completed |
-| First Question Conversion | opened → question_asked |
-| First Successful Recall | opened → first_successful_recall；注意隐私关闭/离线导致的漏报 |
-| Weekly Successful Recalls | 每周 retrieval_succeeded 次数，另看有成功召回的活跃实例数 |
-| Citation Click Rate | 有 citation_clicked 的实例 / 有 retrieval_succeeded 的实例，按同一时间窗口 |
-| Import Failure Rate | SUM(failure_count) / (SUM(success_count) + SUM(failure_count))，避免部分失败事件重复计数 |
-| Retrieval Abstain Rate | retrieval_abstained / (retrieval_succeeded + retrieval_abstained)；不含普通聊天 |
-| Observed Error/Crash Rate | app_error 按 error_type 分组；worker_exited/rust_panic 单独观察，不宣称全量崩溃覆盖 |
-| Updates | update_available → update_started → update_completed，以及 update_failed 的枚举错误类型 |
-
-导入部分成功的任务会同时有 completed 和 failed 事件。计算文件失败率时只聚合 completed 的 success_count、failed 的 failure_count；不要把两个事件上的同名字段都相加。重复文件跳过不是新导入成功，也不应算失败。没有 job/session 内容标识，图表只能做这种聚合，不做单个文件/单个问题追踪。
-
-`citation_clicked` 是点击有效引用入口，不等于阅读理解或用户满意度。没有对话/问题/文件 ID，不将 citation clicks 伪装成能逐问精确归因的转化率。
-
-## 核心漏斗
-
-App Opened → Import Completed（成功数 > 0）→ Question Asked → First Successful Recall → Citation Clicked。
-
-使用同一安装实例的有序漏斗，建议 7 天转化窗口。笔记是另一条输入路径，可另看 opened → note_created → question_asked → first_successful_recall；当前 note_created 是创建记录，不等于正文已完成。
+| DAU / WAU / MAU | 今天／含今天的 7／30 个自然日内至少一个允许事件的唯一安装实例；长期打开的应用不只依赖启动事件 |
+| 首次观测安装 | 所选时段内首次收到允许事件的安装，不等于新增真实用户或实际安装时间 |
+| 资料回答占比 | retrieval_succeeded / (retrieval_succeeded + retrieval_abstained)，不称为准确率；无分母显示 — |
+| 导入失败占比 | import_failed.failure_count / (import_completed.success_count + import_failed.failure_count)，不双计部分成功任务 |
+| 提问／来源查看／创建笔记 | 对应事件次数，不包含内容，不是逐问转化、满意度或笔记完成量 |
+| 版本分布 | 每个时段内活跃安装只计最后一次观测版本，不相加历史版本 |
+| 错误类型与版本 | app_error、update_failed 枚举按版本汇总次数及涉及安装数，不查看原始错误 |
+| 更新事件 | 可用、开始、完成后重开、失败分别计数；跨时段及重试无法精确归因，不伪造成功率 |
 
 ## 留存
 
-用 `app_opened` 作为回访事件看 D1/D7/D30。进一步用每周至少一次 `retrieval_succeeded` 观察是否持续得到价值，无需新增客户端 weekly 事件。
+D1／D7／D30 表示同一安装首次观测后的对应自然日是否再次产生允许事件。仅纳入所选时段内**已经结束的目标回访日**；D30 使用 30 天前的成熟首次观测 cohort。回访日未结束或没有样本时显示 —，不是 0%。旧版刚开始上报也可能进入首次观测 cohort。
 
-PostHog 关闭 person profiles、会话录像、自动采集和不必要 geo-IP enrichment。按最小权限授权看板，设置适当的数据保留周期；项目管理 token 不进入客户端。
+## 无数据与故障
 
-指标口径和数据限制见 [PRIVACY_TELEMETRY.md](PRIVACY_TELEMETRY.md)。
+- 尚未收到事件：明确提示等待支持统计的桌面版本，不填演示数字。
+- 盐未配置：显示统计服务尚未配置，采集返回 503。
+- 统计数据库失败：显示失败和重试，不把故障当零使用；版本管理和更新仍工作。
+- 不提供真实在线人数、注册用户数、精确安装总量、个人操作历史、文件内容、完整崩溃日志或用户满意度，这些无法从允许字段可靠计算。
+
+容量与保留见 [PRIVACY_TELEMETRY.md](PRIVACY_TELEMETRY.md)。
+
+## 开发验收
+
+scripts/qa-control-plane.py --port 8924 使用临时库、合成管理员与合成事件；--empty 验证空数据。仅回环监听，页面标记测试数据。禁止部署该脚本／测试资源验证器。生产采集探针只测试被拒绝的无内容格式，不插入合成使用事件。

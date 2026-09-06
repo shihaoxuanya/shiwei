@@ -1,43 +1,44 @@
-# 匿名统计与错误报告
+# 基础使用统计与错误报告
 
-v0.3 的匿名统计与错误报告**默认关闭**。用户可在“设置 → 隐私 → 帮助改进拾微”主动开启或关闭，两类报告共用一个开关。没有配置 PostHog 时，即使开启也不会发送。浏览器预览不发送生产统计。
+## 开关与兼容
 
-## 发送什么
+按 2026-09-06 的明确产品决定，0.3.1 新生产安装默认开启基础统计，不弹确认框。“设置 → 隐私 → 帮助改进拾微”说明字段和用途，并可随时关闭。已有安装的关闭状态原样保留；损坏／不可读设置关闭上报。开发构建默认关闭，浏览器预览不发送生产统计。打包应用验收设置 SHIWEI_TELEMETRY_DISABLED=1，不读取或改写真实安装统计设置。
 
-- 随机 UUID v4 `installation_id`，保存在本地 Tauri App Local Data 的 `installation.json`；同一安装目录跨版本保持稳定。
-- App 版本、OS 类型、架构、事件时间。
-- 白名单功能事件：`app_installed`、`app_opened`、`app_version`、`import_started`、`import_completed`、`import_failed`、`note_created`、`question_asked`、`retrieval_succeeded`、`retrieval_abstained`、`first_successful_recall`、`citation_clicked`、`update_available`、`update_started`、`update_completed`、`update_failed`、`app_error`。
-- 导入数量区间（1 / 2–10 / 11–100 / 100+）、有限数值的成功/失败数量、耗时。
-- 错误类型来自固定枚举；堆栈仅保留允许的应用模块和数字行列，不含错误消息、函数参数、代码片段、用户目录或请求地址。
+“不含正文”不等于没有隐私影响。随机安装标识和使用时间仍属于去标识化遥测，网络基础设施仍可看到连接 IP。
 
-## 永不作为统计上传的内容
+## 字段白名单
 
-文件/笔记/Chunk/引用正文、文件名、完整路径、问题和回答正文、Embedding、模型/API Key、Authorization、Windows 用户名、真实姓名、邮箱、知识库主题、MAC、SID、CPU/磁盘序列号或硬件指纹。
+- 原生层生成的 UUID v4 安装标识和每请求随机事件 ID；无真实身份或硬件指纹。
+- App 版本、操作系统、架构、事件时间。
+- 固定事件：app_installed、app_opened、app_version、import_started、import_completed、import_failed、note_created、question_asked、retrieval_succeeded、retrieval_abstained、first_successful_recall、citation_clicked、update_available、update_started、update_completed、update_failed、app_error。
+- 导入数量区间、有限成功／失败数、耗时；错误类型固定枚举。堆栈仅允许应用模块和有限数字行列，服务端只保存模块，不保存行列或错误原文。
 
-不安装浏览器自动采集 SDK，不启用 session replay、autocapture、DOM/页面跟踪、cookies 身份识别或请求 breadcrumbs。Rust 统一 `sanitize_telemetry_payload` 是正向白名单，连允许字段的值也限制为枚举或有界数字；未知字段及嵌套对象默认丢弃，而不只靠黑名单删几个敏感名称。
+禁止上传文件、笔记、Chunk、引用正文、文件名、路径、问题、回答、Embedding、模型名称／Key、Authorization、Windows 用户名、姓名、邮箱、知识库主题、MAC、SID、硬件序列号。无自动采集 SDK、DOM 跟踪、录像、身份 cookies、请求 breadcrumbs。
 
-## 身份、IP 与指标限制
+Rust sanitize_telemetry_payload 按字段和值清洗；服务端再次按事件类型严格校验，拒绝未知字段、任意错误字符串和不合理数字。数据库只有明确标量列，不存任意 JSON。验证失败固定返回，不回显输入。
 
-`installation_id` 标识匿名安装实例，不代表真实人数。卸载并清除 App Data、换电脑等可能生成新的实例。我们不使用 IP 作为身份；事件关闭 person profile 与 geo-IP，并设置固定 `$ip`。HTTPS 网络与托管服务基础设施仍可能看到连接来源 IP，因此不可宣称网络层完全看不到 IP；需在服务商端核对日志保留与地域配置。
+## 自有服务与保留
 
-默认关闭意味着统计只覆盖同意参与且发送成功的安装实例，不能推算全部安装量。`app_installed` 是首次同意后观察到的安装，不一定是操作系统首次安装时间。离线、关闭统计期间不补传使用历史。
+默认由原生层 HTTPS 发送到 https://zhishimanghe.com/api/v1/telemetry/events，不携带 cookies 或管理员凭据。analyticsHost 非空、analyticsKey 为空选择第一方传输；保留已有 PostHog 公开 phc_ 项目配置作为可替换传输，默认不依赖它。
 
-## 成功召回定义
+独立 control-analytics.db 与版本库并列，不打开用户知识库。安装和事件 UUID 经服务器专用 HMAC-SHA256 盐处理，原 UUID 不落库。盐仅存服务器受限环境文件，不进入源码或客户端。只有管理员汇总 API，没有单个安装画像、原始事件或内容查看接口。
 
-当前近似定义：Worker 完成既有相关性/证据筛选，最终 `answerKind = knowledge`，至少一条有效引用，未以 `not_found` 拒答。普通聊天、概览、单纯 HTTP 200、没有证据的回答不算成功召回；文件元数据卡片也不算正文证据。
+事件最多保留 90 天，启动、收数／汇总和每小时任务都会清理。90 天不活跃的安装摘要也清理；活跃安装仅保留首次／最近观测时间。SQLite secure_delete 与 WAL 清理启用，生产 umask=0077。不要把统计库加入无限期备份；更换盐会改变去重身份，不能将前后窗口拼成连续人数。
 
-这只是产品早期代理指标，不代表用户已确认答案有用。`Weekly Successful Recalls` 在 PostHog 按周统计 `retrieval_succeeded`。首次成功状态保存在本地，首次成功时尝试发送一次 activation；以后不重复。若首次发生时统计关闭、服务未配置或网络失败，不在后来补报，保证不回放用户未授权的历史。它是 best-effort/at-most-once，不承诺网络 exactly-once。
+应用与代理不启用访问日志；Caddy 运行错误日志过滤完整 request／headers，避免错误请求额外留下 IP、URI 或安装标识。依据 [Caddy 日志过滤文档](https://caddyserver.com/docs/caddyfile/directives/log)，部署前使用隔离代理错误测试验证。不宣称云服务商网络基础设施也完全不保留 IP。
 
-## 关闭和故障
+## 故障与限制
 
-关闭会使前端统计 no-op，并由原生层更新持久化同意状态、取消未完成上传 future、丢弃旧 consent generation 的任务。已经到达服务商的数据无法通过取消请求追回；不再主动重试或排队补传。
+客户端最多 8 个在途请求，4 秒超时，无磁盘事件队列、无补传、无递归异常报告。关闭取消未完成请求并作废旧任务；已经收到的数据无法通过取消追回，按保留周期清理。
 
-没有持久化事件队列。最多 8 个在途请求、4 秒超时，失败直接丢弃，不影响启动、导入、保存、检索、问答或关闭，不递归上传统计服务自己的异常。开发调试只记录经过清洗的事件名，不打印 key、身份或正文。
+服务端限制 4KB JSON、5 秒读请求、每 IP 每分钟 600 次、全局每分钟 1200 次、单安装 24 小时 2000 条，总计 200000 条事件／20000 个安装摘要。重复事件幂等；时间只接受过去 24 小时至未来 5 分钟，略快时钟截到接收时刻。满额、断网或统计数据库异常不影响本地工作流、登录和版本检查。
 
-## 错误报告范围
+公开采集接口没有秘密客户端令牌；嵌入客户端的凭据不能证明真人身份。限流不能消除伪造事件，因此这些统计不用于计费或安全审计。
 
-当前复用 PostHog 的 `app_error` 事件和结构化安全 frames 做基础错误统计，不引入第二个平台。覆盖前端未处理异常/Promise 拒绝、Worker 调用错误/退出/超时与可捕获 Rust panic；不是携带完整进程内存的 crash dump 系统。进程被强杀、系统断电、原生访问违规等可能来不及上报；完整符号化 native crash 收集尚未实现，不能用现有事件数宣称所有崩溃均已覆盖。
+## 口径和错误范围
 
-模型服务请求是用户另行配置的功能，与统计开关独立；关闭匿名统计不会关闭正常模型调用。已有远程 Embedding 的文本传输边界仍按模型设置说明执行。
+只统计成功上报的安装实例，不代表全部用户。首次观测不是系统安装日期，重装可能产生新实例。指标详见 [ANALYTICS_DASHBOARD.md](ANALYTICS_DASHBOARD.md)。
 
-参考：[PostHog Capture API](https://posthog.com/docs/api/capture)。
+“有证据的资料回答”沿用最终 answerKind=knowledge 且有有效正文引用的代理定义，普通聊天／文件卡片／单纯 HTTP 200 不算；这不是准确率。首次成功事件 best-effort、at-most-once，关闭或离线期间不补报。
+
+错误范围包括前端异常、Worker 错误／退出／超时、可捕获 Rust panic，不采集进程内存或完整 crash dump。断电、强杀等可能漏报，不能宣称全量崩溃覆盖。模型调用与统计开关独立，模型传输边界仍按设置说明。

@@ -1,4 +1,4 @@
-//! Content-free, opt-in control plane. Never receives the knowledge database.
+//! Content-free control plane. New release installs default on; existing choices persist.
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::{
@@ -111,11 +111,13 @@ fn enum_field(input: &Value, output: &mut Map<String, Value>, key: &str, allowed
     }
 }
 fn number_field(input: &Value, output: &mut Map<String, Value>, key: &str) {
-    if let Some(value) = input
-        .get(key)
-        .and_then(Value::as_u64)
-        .filter(|n| *n <= 86_400_000)
-    {
+    if let Some(value) = input.get(key).and_then(Value::as_u64).filter(|n| {
+        *n <= if key == "duration_ms" {
+            86_400_000
+        } else {
+            100_000
+        }
+    }) {
         output.insert(key.into(), json!(value));
     }
 }
@@ -150,17 +152,17 @@ pub struct AnalyticsStatus {
 pub struct AnalyticsService {
     state: Mutex<Installation>,
     path: Option<PathBuf>,
-    provider: PostHogAnalyticsProvider,
+    provider: MetadataAnalyticsProvider,
     consent: watch::Sender<(bool, u64)>,
     slots: Arc<Semaphore>,
     #[cfg(test)]
     observer: Option<Arc<dyn Fn(&Value) + Send + Sync>>,
 }
-struct PostHogAnalyticsProvider {
+struct MetadataAnalyticsProvider {
     host: Option<reqwest::Url>,
     key: String,
 }
-impl PostHogAnalyticsProvider {
+impl MetadataAnalyticsProvider {
     fn new(host: &str, key: &str) -> Self {
         let host = reqwest::Url::parse(host).ok().filter(|u| {
             u.scheme() == "https"
@@ -175,23 +177,33 @@ impl PostHogAnalyticsProvider {
         }
     }
     fn configured(&self) -> bool {
-        self.host.is_some() && self.key.starts_with("phc_")
+        self.host.is_some() && (self.key.is_empty() || self.key.starts_with("phc_"))
     }
 }
 impl AnalyticsService {
     pub fn new(path: PathBuf, host: &str, key: &str) -> Self {
-        let state = fs::read(&path)
+        // A development build must not create synthetic production analytics by default.
+        Self::new_with_default(path, host, key, !cfg!(debug_assertions))
+    }
+    fn new_with_default(path: PathBuf, host: &str, key: &str, new_install_enabled: bool) -> Self {
+        let missing = !path.exists();
+        let mut state = fs::read(&path)
             .ok()
             .and_then(|b| serde_json::from_slice::<Installation>(&b).ok())
             .filter(|s| {
                 Uuid::parse_str(&s.installation_id).is_ok_and(|id| id.get_version_num() == 4)
             })
             .unwrap_or_default();
+        // Existing false (including old opt-in defaults) stays false. Unreadable/corrupt
+        // settings fail closed rather than silently re-enabling telemetry on an upgrade.
+        if missing {
+            state.enabled = new_install_enabled;
+        }
         let (consent, _) = watch::channel((state.enabled, 0));
         let result = Self {
             state: Mutex::new(state),
             path: Some(path),
-            provider: PostHogAnalyticsProvider::new(host, key),
+            provider: MetadataAnalyticsProvider::new(host, key),
             consent,
             slots: Arc::new(Semaphore::new(8)),
             #[cfg(test)]
@@ -210,7 +222,7 @@ impl AnalyticsService {
             fs::write(&tmp, serde_json::to_vec(state)?)?;
             fs::rename(tmp, path)
         };
-        action().map_err(|_| "无法保存隐私设置；匿名统计保持关闭".into())
+        action().map_err(|_| "无法保存隐私设置；基础统计保持关闭".into())
     }
     fn save(&self) -> Result<(), String> {
         let state = self.state.lock().map_err(|_| "隐私状态不可用")?;
@@ -313,17 +325,28 @@ impl AnalyticsService {
         let Ok(permit) = self.slots.clone().try_acquire_owned() else {
             return;
         };
-        let mut payload = properties;
-        payload["installation_id"] = json!(state.installation_id);
-        payload["app_version"] = json!(env!("CARGO_PKG_VERSION"));
-        payload["os"] = json!(std::env::consts::OS);
-        payload["architecture"] = json!(std::env::consts::ARCH);
-        payload["$process_person_profile"] = json!(false);
-        payload["$geoip_disable"] = json!(true);
-        payload["$ip"] = json!("0.0.0.0");
         let timestamp = chrono::Utc::now().to_rfc3339();
-        payload["event_timestamp"] = json!(timestamp);
-        let body = json!({ "api_key": self.provider.key, "event": event, "distinct_id": state.installation_id, "properties": payload, "timestamp": timestamp });
+        let body = if self.provider.key.is_empty() {
+            // First-party transport: no public project token, cookies, user agent SDK,
+            // IP properties, or arbitrary strings. UUIDs are native-generated only.
+            json!({ "schema_version": 1, "event_id": Uuid::new_v4().to_string(),
+                "installation_id": state.installation_id, "event": event,
+                "app_version": env!("CARGO_PKG_VERSION"), "os": std::env::consts::OS,
+                "architecture": std::env::consts::ARCH, "timestamp": timestamp,
+                "properties": properties })
+        } else {
+            // Retain the replaceable PostHog transport for existing configured builds.
+            let mut payload = properties;
+            payload["installation_id"] = json!(state.installation_id);
+            payload["app_version"] = json!(env!("CARGO_PKG_VERSION"));
+            payload["os"] = json!(std::env::consts::OS);
+            payload["architecture"] = json!(std::env::consts::ARCH);
+            payload["$process_person_profile"] = json!(false);
+            payload["$geoip_disable"] = json!(true);
+            payload["$ip"] = json!("0.0.0.0");
+            payload["event_timestamp"] = json!(timestamp);
+            json!({ "api_key": self.provider.key, "event": event, "distinct_id": state.installation_id, "properties": payload, "timestamp": timestamp })
+        };
         drop(state);
         if *consent.borrow() != generation {
             return;
@@ -334,7 +357,11 @@ impl AnalyticsService {
             return;
         }
         let mut url = self.provider.host.clone().expect("validated host");
-        url.set_path("/i/v0/e/");
+        url.set_path(if self.provider.key.is_empty() {
+            "/api/v1/telemetry/events"
+        } else {
+            "/i/v0/e/"
+        });
         if cfg!(debug_assertions) && std::env::var("SHIWEI_ANALYTICS_DEBUG").as_deref() == Ok("1") {
             // Only sanitized event metadata; excludes transport key and installation identity.
             eprintln!("[analytics] {event}");
@@ -361,6 +388,13 @@ impl AnalyticsService {
     }
 }
 pub fn initialize(path: Option<PathBuf>) -> Arc<AnalyticsService> {
+    // Process-local kill switch for isolated packaged-app QA and managed deployments.
+    // Do not read or overwrite the real installation preference in this mode.
+    if std::env::var("SHIWEI_TELEMETRY_DISABLED").as_deref() == Ok("1") {
+        let service = Arc::new(AnalyticsService::disabled());
+        let _ = GLOBAL.set(service.clone());
+        return service;
+    }
     let service = Arc::new(match path {
         Some(path) => AnalyticsService::new(
             path,
@@ -392,7 +426,7 @@ impl AnalyticsService {
         Self {
             state: Mutex::new(Installation::default()),
             path: None,
-            provider: PostHogAnalyticsProvider::new("", ""),
+            provider: MetadataAnalyticsProvider::new("", ""),
             consent: watch::channel((false, 0)).0,
             slots: Arc::new(Semaphore::new(8)),
             #[cfg(test)]
@@ -500,6 +534,66 @@ mod tests {
         assert!(!a.status().enabled);
         let b = AnalyticsService::new(path, "", "");
         assert_eq!(b.state.lock().unwrap().installation_id, id);
+    }
+    #[test]
+    fn release_default_on_preserves_existing_disabled_and_corrupt_preferences() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installation.json");
+        let service =
+            AnalyticsService::new_with_default(path.clone(), "https://example.invalid", "", true);
+        assert!(service.status().enabled && service.status().configured);
+        service.set_enabled(false).unwrap();
+        let old_id = service.update_installation_id().unwrap();
+        let upgraded =
+            AnalyticsService::new_with_default(path.clone(), "https://example.invalid", "", true);
+        assert!(!upgraded.status().enabled);
+        assert_eq!(upgraded.update_installation_id().unwrap(), old_id);
+        fs::write(&path, b"broken json").unwrap();
+        assert!(
+            !AnalyticsService::new_with_default(path, "https://example.invalid", "", true)
+                .status()
+                .enabled
+        );
+    }
+    #[test]
+    fn first_party_envelope_has_only_allowlisted_metadata_and_random_event_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let mut service = AnalyticsService::new_with_default(
+            dir.path().join("installation.json"),
+            "https://example.invalid",
+            "",
+            true,
+        );
+        let observer = captured.clone();
+        service.observer = Some(Arc::new(move |body| {
+            observer.lock().unwrap().push(body.clone())
+        }));
+        let service = Arc::new(service);
+        service.opened();
+        service.track(
+            "import_completed",
+            json!({"success_count":2,"filename":"private.pdf","api_key":"secret"}),
+        );
+        service.track(
+            "app_error",
+            json!({"error_type":"frontend_error","message":"private content"}),
+        );
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 5);
+        for v in events.iter() {
+            assert_eq!(v["schema_version"], 1);
+            assert_eq!(
+                Uuid::parse_str(v["event_id"].as_str().unwrap())
+                    .unwrap()
+                    .get_version_num(),
+                4
+            );
+            assert_eq!(v["installation_id"], events[0]["installation_id"]);
+            assert!(v.get("api_key").is_none() && v.get("distinct_id").is_none());
+            assert!(!v.to_string().contains("private") && !v.to_string().contains("secret"));
+        }
+        assert_ne!(events[0]["event_id"], events[1]["event_id"]);
     }
     #[test]
     fn sanitizer_drops_all_content_and_untrusted_values() {

@@ -35,7 +35,7 @@ MVP 只验证一条闭环：资料导入或随手记录 → 自动处理 → 精
 
 账号、云知识库、同步、用户内容上传、移动端、协作、笔记文件夹/标签、知识图谱、Markdown 富文本编辑器、插件市场、工作流、Agent、GraphRAG 和复杂企业权限均不属于 MVP。
 
-v0.3 明确授权最小发布控制面：版本/构建/签名更新、默认关闭的匿名使用统计与错误报告、仅本地实现的 Feature Flag 接口。它不拥有个人知识，不改变核心检索闭环；详见 [RELEASING.md](RELEASING.md) 和 [PRIVACY_TELEMETRY.md](PRIVACY_TELEMETRY.md)。此前“不做遥测”的边界由这项明确任务有限替代。
+v0.3 明确授权最小发布控制面：版本/构建/签名更新、基础使用统计与错误报告、仅本地实现的 Feature Flag 接口。2026-09-06 的后台完善任务将新生产安装的基础统计调整为默认开启、不弹确认框，保留明确说明和关闭入口；已有关闭选择不变。自有管理后台只提供汇总指标和版本管理，不拥有个人知识，不改变核心检索闭环；详见 [ANALYTICS_DASHBOARD.md](ANALYTICS_DASHBOARD.md) 和 [PRIVACY_TELEMETRY.md](PRIVACY_TELEMETRY.md)。此前“不做遥测／默认关闭”的边界由明确任务有限替代。
 
 ## 最终验收
 

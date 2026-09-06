@@ -11,6 +11,7 @@ fn main() {
         println!("cargo:rerun-if-env-changed={env}");
         let value = std::env::var(env)
             .ok()
+            .filter(|v| !v.is_empty())
             .unwrap_or_else(|| config[key].as_str().unwrap_or("").to_owned());
         assert!(
             !value.contains(['\n', '\r']),

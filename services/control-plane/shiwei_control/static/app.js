@@ -1,7 +1,18 @@
+import { metricsView } from './metrics.js';
 const view = document.querySelector('#view'), message = document.querySelector('#message');
 const modal = document.querySelector('#confirmation'), confirmForm = document.querySelector('#confirm-form');
 const logout = document.querySelector('#logout');
 let csrf = '', listing, pending = null, selected = null;
+let section = 'metrics', viewEpoch = 0, metricDays = 7, metricsLoading = false;
+function startView(name, title) {
+  section = name; viewEpoch++; document.querySelector('#page-title').textContent = title;
+  document.querySelector('nav').hidden = !csrf;
+  for (const key of ['metrics', 'releases']) {
+    const b = document.querySelector(`#nav-${key}`); b.classList.toggle('nav-active', key === name);
+    if (key === name) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+  }
+  return viewEpoch;
+}
 const labels = { DRAFT:'待构建', READY:'待发布', ROLLOUT:'灰度发布', PUBLISHED:'正式发布', PAUSED:'已暂停', REVOKED:'已撤销' };
 function el(tag, text, cls) { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (cls) node.className = cls; return node; }
 function button(text, fn, cls) { const b = el('button', text, cls); b.type = 'button'; b.addEventListener('click', () => Promise.resolve(fn()).catch(showError)); return b; }
@@ -25,21 +36,24 @@ function link(value, title) {
   } catch { return el('span', '地址不可用'); }
 }
 function renderLogin() {
+  startView('login', '管理后台'); document.querySelector('nav').hidden = true;
   selected = null; logout.hidden = true; modal.close(); pending = null;
   const form = el('form', undefined, 'panel login');
-  form.append(el('h2','登录发布后台'),el('p','仅供维护者使用。用户无需注册拾微账号。','muted'));
+  form.append(el('h2','登录管理后台'),el('p','仅供维护者使用。用户无需注册拾微账号。','muted'));
   const email = field(form,'管理员邮箱','email','','email'); email.required = true; email.autocomplete = 'username';
   const password = field(form,'密码','password','','password'); password.required = true; password.autocomplete = 'current-password';
   const submit = el('button','登录','primary'); submit.type = 'submit'; form.append(submit);
   form.addEventListener('submit', async e => { e.preventDefault(); submit.disabled = true; message.textContent = ''; try {
-    const result = await api('/api/auth/login', { email:email.value, password:password.value }); csrf = result.csrf; password.value = ''; await renderList();
+    const result = await api('/api/auth/login', { email:email.value, password:password.value }); csrf = result.csrf; password.value = ''; await renderMetrics();
   } catch (error) { showError(error); } finally { submit.disabled = false; } });
   view.replaceChildren(form);
 }
 async function renderList() {
-  listing = await api('/api/admin/releases'); selected = null; logout.hidden = false; message.textContent = '';
+  const epoch = startView('releases', '版本管理');
+  const next = await api('/api/admin/releases'); if (epoch !== viewEpoch || !csrf) return;
+  listing = next; selected = null; logout.hidden = false; message.textContent = '';
   const current = listing.releases.find(r => r.id === listing.target_id), stats = el('section', undefined, 'stats');
-  for (const [title, value, detail] of [['当前发布目标',current ? `v${current.version}` : '暂无',current ? labels[current.status] : '等待构建并验证安装包'],['发布比例',current ? `${current.rollout_percentage}%` : '—','按安装标识稳定分组'],['版本分布与更新成功率','暂无数据','仅统计明确同意分享的匿名数据']]) {
+  for (const [title, value, detail] of [['当前发布目标',current ? `v${current.version}` : '暂无',current ? labels[current.status] : '等待构建并验证安装包'],['发布比例',current ? `${current.rollout_percentage}%` : '—','按安装标识稳定分组'],['已登记版本',String(listing.releases.length),'使用情况请查看数据概览']]) {
     const s = el('div',undefined,'stat'); s.append(el('span',title,'muted'),el('strong',value),el('span',detail,'muted')); stats.append(s);
   }
   if (listing.analytics_dashboard) stats.lastChild.append(el('br'),link(listing.analytics_dashboard,'查看已配置的统计面板'));
@@ -54,6 +68,7 @@ async function renderList() {
   view.replaceChildren(stats,bar,listing.releases.length ? wrap : el('p','还没有版本。CI 完成构建、上传与校验后，版本将出现在这里。','panel muted'));
 }
 function renderDraft() {
+  startView('releases', '版本管理');
   const form = el('form',undefined,'panel'); form.append(el('h2','创建待构建版本'),el('p','这里只登记版本。安装包必须由 CI 构建、签名并验证，不能在后台上传源码或修改签名。','muted'));
   const version = field(form,'版本号（例如 0.3.1）','version'); version.required = true;
   const notes = field(form,'更新说明','release_notes','','textarea'); notes.maxLength = 8000;
@@ -67,7 +82,9 @@ function confirm(row, action, title, options = {}) {
   document.querySelector('#confirm-error').textContent = ''; modal.showModal(); confirmForm.elements.confirm_version.focus();
 }
 async function renderDetail(version) {
+  const epoch = startView('releases', '版本管理');
   const data = await api(`/api/admin/releases/${encodeURIComponent(version)}`), r = data.release;
+  if (epoch !== viewEpoch || !csrf) return;
   selected = version; message.textContent = ''; const bar = el('div',undefined,'toolbar'); bar.append(button('返回版本列表',renderList),button('刷新',() => renderDetail(version)));
   const grid = el('div',undefined,'grid'), left = el('section',undefined,'panel'), right = el('section',undefined,'panel');
   left.append(el('h2',`v${r.version}`),badge(r.status),el('h3','更新说明'),el('p',r.release_notes || '暂无更新说明','notes'));
@@ -111,4 +128,22 @@ confirmForm.addEventListener('submit',async e => {
   catch(e) { error.textContent=e.message; } finally { controls.forEach(b => b.disabled=false); }
 });
 logout.addEventListener('click',async () => { try { await api('/api/admin/logout',{}); csrf=''; renderLogin(); } catch(e) { showError(e); } });
-try { const s = await api('/api/admin/session'); csrf=s.csrf; await renderList(); } catch { renderLogin(); }
+async function renderMetrics(quiet = false) {
+  const epoch = startView('metrics', '数据概览'); logout.hidden = false;
+  if (!quiet) view.replaceChildren(el('p', '正在汇总使用数据…', 'panel muted'));
+  metricsLoading = true;
+  try {
+    const data = await api(`/api/admin/metrics?days=${metricDays}`);
+    if (epoch !== viewEpoch || !csrf) return;
+    message.textContent = '';
+    view.replaceChildren(metricsView(data, { el, button, daysChanged: days => { metricDays = days; void renderMetrics(); }, refresh: () => renderMetrics() }));
+  } catch (error) {
+    if (epoch !== viewEpoch || !csrf) return;
+    showError(error);
+    if (!quiet) { const block = el('section', undefined, 'panel'); block.append(el('h2', '暂时无法读取统计'), el('p', '不会将服务错误显示为零数据。版本管理仍可单独使用。', 'muted'), button('重试', () => renderMetrics())); view.replaceChildren(block); }
+  } finally { if (epoch === viewEpoch) metricsLoading = false; }
+}
+document.querySelector('#nav-metrics').addEventListener('click', () => void renderMetrics());
+document.querySelector('#nav-releases').addEventListener('click', () => void renderList().catch(showError));
+setInterval(() => { if (csrf && section === 'metrics' && !metricsLoading && !document.hidden) void renderMetrics(true); }, 60_000);
+try { const s = await api('/api/admin/session'); csrf=s.csrf; await renderMetrics(); } catch { renderLogin(); }

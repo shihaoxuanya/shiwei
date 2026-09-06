@@ -56,10 +56,14 @@ test('official metadata requires HTTPS, stable version, and embedded signature c
   assert.equal(result.platforms['windows-x86_64'].signature, sig);
   for (const [version, url, signature] of [['0.4.0-beta.2', 'https://example.com/a', sig], ['0.3.0', 'http://example.com/a', sig], ['0.3.0', 'https://example.com/a', 'bad']]) assert.throws(() => updateMetadata(version, url, signature, '更新'));
 });
-test('release config contains no enabled analytics or fabricated update endpoint', () => {
+test('release config uses first-party HTTPS analytics without embedded secrets', () => {
   const config = JSON.parse(readFileSync(resolve(root, 'release.config.json'), 'utf8'));
   assert.equal(config.channel, 'stable');
   assert.ok(!('privateKey' in config));
+  assert.equal(new URL(config.analyticsHost).origin, config.controlPlaneOrigin);
+  assert.equal(new URL(config.analyticsHost).protocol, 'https:');
+  assert.equal(config.analyticsKey, '');
+  assert.ok(!('analyticsSalt' in config));
 });
 test('release staging refuses stale installers and unexpected uploads', () => {
   validateArtifactDirectory(['Shiwei_0.3.0_x64-setup.exe', 'latest.json'], '0.3.0');

@@ -1,5 +1,26 @@
 # Merge this site into the server's existing Caddy config; do not replace other sites.
 # Caddy obtains and renews the public TLS certificate. Backend is loopback-only.
+{
+    # Runtime error logs can also include a request object even with access logs off.
+    # Keep operational status/errors, remove the complete request (IP, URI, headers).
+    log default {
+        format filter {
+            wrap json
+            fields {
+                request delete
+                headers delete
+                resp_headers delete
+            }
+        }
+    }
+    servers {
+        timeouts {
+            read_header 10s
+            read_body 10s
+            idle 1m
+        }
+    }
+}
 zhishimanghe.com {
     request_body {
         max_size 32KB

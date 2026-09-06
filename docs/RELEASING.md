@@ -7,7 +7,7 @@ v0.3 只增加发布控制面；知识库、笔记、原始文件、对话和索
 1. 私有源码库为 `shihaoxuanya/shiwei`，公开安装包库为 `shihaoxuanya/shiwei-releases`；用户不需要 GitHub 登录即可下载。
 2. 按 [RELEASE_SECRETS.md](RELEASE_SECRETS.md) 创建 GitHub `release` environment，并建议启用人工审批、限定受保护 tag 的访问权限。
 3. 配置官方 Updater 公钥、私钥与 `https://zhishimanghe.com/api/v1/updates/check?current_version={{current_version}}&channel=stable`。不再使用 GitHub latest.json 分发入口，以免绕过发布后台。应用不携带 GitHub token。
-4. 可选配置 PostHog 的公开 Project API Key 与采集 Host；没有配置时统计保持 no-op。没有商业 Windows 证书可以做内部测试，但不等于安装包已有 Authenticode 签名。
+4. release.config.json 已配置自有统计 Host，空 analyticsKey 表示第一方传输；服务器独立配置 SHIWEI_ANALYTICS_SALT，永不把盐或管理员令牌嵌入客户端。环境变量非空时可覆盖 Host；保留旧 PostHog 公开项目作为替换配置。新生产安装默认开启基础统计，已有关闭选择不变。没有商业 Windows 证书可以做内部测试，但不等于安装包已有 Authenticode 签名。
 
 ## 版本与本地验证
 

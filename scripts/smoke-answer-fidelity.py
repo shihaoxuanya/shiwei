@@ -84,7 +84,8 @@ def main():
                 assert 'error' not in response, response.get('error')
                 return response['result'], ''.join(events)
         try:
-            assert rpc('ping')[0]['workerVersion'] == '0.2.2'
+            worker_version = rpc('ping')[0]['workerVersion']
+            assert worker_version == (ROOT / 'VERSION').read_text().strip()
             note = rpc('create_note')[0]['note']
             raw = '本次会议讨论Oracle至TiDB迁移。单次全量迁移预计耗时38~50天，增量追平需7~14天。至少两轮完整生产级全量迁移。'
             rpc('update_note', {'noteId': note['id'], 'title': '2025年9月3日会议', 'content': raw})
@@ -112,7 +113,7 @@ def main():
             assert rpc('get_note', {'noteId': note['id']})[0]['note']['content'] == raw
             history = rpc('get_conversation', {'conversationId': answer['conversationId']})[0]
             assert history['conversation']['messages'][-1]['citations'][0]['mentionedDates'] == ['2025-09-03']
-            print(json.dumps({'status': 'passed', 'workerVersion': '0.2.2', 'rangeContextAndSse': True, 'numericRepairBeforeEmission': True, 'citationGrouping': True, 'meetingEvidenceOnly': True, 'negativeCases': 3, 'noteDatesHistory': True, 'rawNoteUnchanged': True, 'gateway': 'loopback_https_synthetic', 'realCredentialsUsed': False}))
+            print(json.dumps({'status': 'passed', 'workerVersion': worker_version, 'rangeContextAndSse': True, 'numericRepairBeforeEmission': True, 'citationGrouping': True, 'meetingEvidenceOnly': True, 'negativeCases': 3, 'noteDatesHistory': True, 'rawNoteUnchanged': True, 'gateway': 'loopback_https_synthetic', 'realCredentialsUsed': False}))
         finally:
             process.terminate()
             process.wait(timeout=15)

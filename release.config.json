@@ -5,6 +5,6 @@
   "controlPlaneOrigin": "https://zhishimanghe.com",
   "updaterEndpoint": "https://zhishimanghe.com/api/v1/updates/check?current_version={{current_version}}&channel=stable",
   "updaterPublicKey": "",
-  "analyticsHost": "",
+  "analyticsHost": "https://zhishimanghe.com",
   "analyticsKey": ""
 }

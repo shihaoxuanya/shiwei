@@ -11,7 +11,8 @@ export function ReleaseSettings() {
     <section aria-label="隐私" className="rounded-2xl border border-line bg-panel p-6">
       <h2 className="text-sm font-semibold">隐私</h2>
       <label className="mt-4 flex items-center justify-between gap-5 text-sm"><span>帮助改进拾微</span><input type="checkbox" role="switch" aria-label="帮助改进拾微" checked={status.analytics.enabled} disabled={!isTauri()} onChange={(e) => void setAnalyticsConsent(e.target.checked)} className="size-5 accent-indigo" /></label>
-      <p className="mt-3 text-xs leading-6 text-muted">自愿发送匿名使用数据和经过清洗的错误信息，用于改进拾微。不会发送你的文件、笔记、文件名、问题内容或 AI 回答。默认关闭，可随时关闭；错误报告跟随此开关。</p>
+      <p className="mt-3 text-xs leading-6 text-muted">分享基础使用统计与固定类型的错误信息，帮助改进拾微。只发送随机安装标识、版本、使用事件及数量，不发送文件、笔记、文件名、路径、问题内容或 AI 回答。新安装默认开启，可随时关闭；更新会保留已有选择，错误报告跟随此开关。</p>
+      <p className="mt-2 text-xs leading-6 text-muted">统计发送到拾微服务，安装标识经加盐处理后仅用于汇总，不用于识别真实身份。事件最多保留 90 天；关闭后停止后续上报，不补传历史记录。</p>
       {!status.analytics.configured && <p className="mt-2 text-xs text-muted">此构建尚未配置统计服务，不会上传统计数据。</p>}
       {privacyError && <p role="alert" className="mt-3 text-sm text-red-700">{privacyError}</p>}
     </section>

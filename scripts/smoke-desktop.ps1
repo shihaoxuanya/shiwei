@@ -9,10 +9,12 @@ $savedData = $env:SHIWEI_DATA_DIR
 $savedWebView = $env:WEBVIEW2_USER_DATA_FOLDER
 $savedRoaming = $env:APPDATA
 $savedLocal = $env:LOCALAPPDATA
+$savedTelemetry = $env:SHIWEI_TELEMETRY_DISABLED
 $taskProcess = $null
 $taskChildren = @()
 $expectedTitle = -join ([char]0x62FE, [char]0x5FAE)
 try {
+  $env:SHIWEI_TELEMETRY_DISABLED = '1'
   $env:SHIWEI_DATA_DIR = Join-Path $taskSandbox "library"
   $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $taskSandbox "webview"
   $env:APPDATA = Join-Path $taskSandbox "roaming"
@@ -43,6 +45,7 @@ try {
   } | ConvertTo-Json
 }
 finally {
+  $env:SHIWEI_TELEMETRY_DISABLED = $savedTelemetry
   $env:SHIWEI_DATA_DIR = $savedData
   $env:WEBVIEW2_USER_DATA_FOLDER = $savedWebView
   $env:APPDATA = $savedRoaming
