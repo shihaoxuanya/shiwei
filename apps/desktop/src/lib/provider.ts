@@ -50,8 +50,12 @@ export async function getProviderStatus(): Promise<ProviderStatus> {
   return invoke<ProviderStatus>("provider_status");
 }
 
-export async function testProvider(config: ProviderInput): Promise<ProviderTestResult> {
-  return invoke<ProviderTestResult>("provider_test", { config });
+export async function testProvider(config: ProviderInput, target: "all" | "chat" | "embedding" = "all"): Promise<ProviderTestResult> {
+  return invoke<ProviderTestResult>("provider_test", target === "all" ? { config } : { config, target });
+}
+
+export async function clearProviderKey(target: "chat" | "embedding"): Promise<void> {
+  await invoke("provider_clear_key", { target });
 }
 
 export async function fetchProviderModels(config: ProviderInput, target: "chat" | "embedding"): Promise<string[]> {

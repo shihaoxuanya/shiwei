@@ -1,6 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import { beginLibraryActivity } from "./library-location";
 
 export type ImportItem = {
   status: "imported" | "duplicate";
@@ -16,6 +17,7 @@ export type ImportReport = {
   skipped: ImportItem[];
   failed: Array<{ path: string; reason: string }>;
   summary: { imported: number; skipped: number; failed: number };
+  embeddingIndex?: { status?: string; message?: string; requiresRebuild?: boolean };
 };
 
 export type ImportProgress = {
@@ -38,6 +40,7 @@ export type SourceSummary = {
   importedAt: string;
   status: "processing" | "searchable" | "failed";
   error?: string;
+  retrieval?: { keyword: "ready" | "unavailable"; semantic: "disabled" | "pending" | "ready" | "failed" | "requires_rebuild" };
 };
 
 const filters = [
@@ -94,7 +97,8 @@ export async function deleteSource(sourceId: string): Promise<void> {
 }
 
 export async function reindexSource(sourceId: string): Promise<void> {
-  await invoke("reindex_source", { sourceId });
+  const done = beginLibraryActivity("正在重新处理资料");
+  try { await invoke("reindex_source", { sourceId }); } finally { done(); }
 }
 
 export async function openSource(path: string): Promise<void> {

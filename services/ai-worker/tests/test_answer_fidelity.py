@@ -74,7 +74,7 @@ def test_embedding_input_preserves_original_ranges_and_title(tmp_path):
 
 
 @pytest.fixture
-def library(tmp_path):
+def library_importer(tmp_path):
     from shiwei_ai.ingestion import Importer
     importer = Importer(tmp_path / "library")
     notes = NoteService(importer.database, tmp_path / "library" / "parsed")
@@ -87,8 +87,14 @@ def library(tmp_path):
         path = tmp_path / name
         path.write_text(body, encoding="utf-8")
         importer.import_paths([str(path)])
-    yield importer.database, note
+    yield importer, note
     importer.close()
+
+
+@pytest.fixture
+def library(library_importer):
+    importer, note = library_importer
+    return importer.database, note
 
 
 @pytest.mark.parametrize("query,raw,expected", [
@@ -169,10 +175,13 @@ def test_one_repair_can_produce_marked_calculation(library):
     assert "76～100 天" in result.answer and "不是原文" in result.answer
 
 
-def test_note_dates_survive_worker_response_and_history(library):
+def test_note_dates_survive_worker_response_and_history(library_importer):
     from shiwei_ai.worker import WorkerServer
-    database, note = library
-    server = WorkerServer(database.path.parent)
+    importer, note = library_importer
+    server = WorkerServer(importer.data_dir)
+    # The same single writer owns the seeded library and its Worker facade;
+    # a second Importer must now be rejected by the lifetime OS lease.
+    server._importer = importer
     result = server._chat({"query": "我上次开会是什么时候？"})
     citation = result["citations"][0]
     assert citation["noteId"] == note["id"] and citation["mentionedDates"] == ["2025-09-03"]

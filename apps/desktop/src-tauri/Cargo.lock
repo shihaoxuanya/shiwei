@@ -3823,7 +3823,7 @@ dependencies = [
 
 [[package]]
 name = "shiwei-desktop"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3834,6 +3834,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

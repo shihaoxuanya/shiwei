@@ -150,7 +150,9 @@ class LexicalSearch:
     def __init__(self, database: Database) -> None:
         self.database = database
 
-    def search(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
+    def search(self, query: str, limit: int = 20, *, source_type: str | None = None) -> list[dict[str, Any]]:
+        if source_type not in {None, "imported_file", "user_note"}:
+            raise ValueError("无效的资料类型")
         normalized = query.strip()
         terms = search_terms(normalized)
         if not terms:
@@ -161,17 +163,22 @@ class LexicalSearch:
             ("chunks_fts", self._unicode_query(" ".join(terms))),
             ("chunks_fts_trigram", self._unicode_query(" ".join(t for t in terms if len(t) >= 3))),
         ):
+            source_filter = (
+                f"AND EXISTS (SELECT 1 FROM documents scope_doc JOIN sources scope_source "
+                f"ON scope_source.id=scope_doc.source_id WHERE scope_doc.id={table}.document_id "
+                "AND scope_source.source_type=?)"
+            ) if source_type is not None else ""
             try:
                 rows = self.database.connection.execute(
                     f"""
                     SELECT chunk_id, document_id, chunk_content, document_title,
                            filename, headings, bm25({table}) AS rank
                     FROM {table}
-                    WHERE {table} MATCH ?
+                    WHERE {table} MATCH ? {source_filter}
                     ORDER BY rank
                     LIMIT ?
                     """,
-                    (match_query, limit),
+                    (match_query, *([source_type] if source_type is not None else []), limit),
                 ).fetchall()
             except sqlite3.OperationalError:
                 rows = []
@@ -198,9 +205,10 @@ class LexicalSearch:
         # Old indexes remain valid: substring metadata queries also cover two-character Chinese.
         conditions = " OR ".join("(s.original_filename LIKE ? ESCAPE '\\' OR d.title LIKE ? ESCAPE '\\')" for _ in terms)
         patterns = [value for term in terms for value in (like_pattern(term), like_pattern(term))]
+        source_filter = "AND s.source_type=?" if source_type is not None else ""
         metadata_rows = self.database.connection.execute(
-            f"SELECT c.id AS chunk_id, c.document_id, c.content AS chunk_content, d.title AS document_title, s.original_filename AS filename, c.heading_path AS headings FROM sources s JOIN documents d ON d.source_id=s.id JOIN chunks c ON c.document_id=d.id WHERE ({conditions}) ORDER BY c.chunk_index LIMIT 128",
-            patterns,
+            f"SELECT c.id AS chunk_id, c.document_id, c.content AS chunk_content, d.title AS document_title, s.original_filename AS filename, c.heading_path AS headings FROM sources s JOIN documents d ON d.source_id=s.id JOIN chunks c ON c.document_id=d.id WHERE ({conditions}) {source_filter} ORDER BY c.chunk_index LIMIT 128",
+            [*patterns, *([source_type] if source_type is not None else [])],
         ).fetchall()
         for row in metadata_rows:
             filename = row["filename"].lower()
@@ -210,9 +218,14 @@ class LexicalSearch:
         if not hits:
             # Bounded fallback for legacy unicode/trigram indexes, only on an FTS miss.
             conditions = " OR ".join("content LIKE ? ESCAPE '\\'" for _ in terms)
+            candidates = (
+                "SELECT c.id, c.document_id, substr(c.content,1,12000) AS content, c.heading_path "
+                "FROM chunks c JOIN documents sd ON sd.id=c.document_id JOIN sources ss ON ss.id=sd.source_id "
+                "WHERE ss.source_type=? ORDER BY c.rowid DESC LIMIT 50000"
+            ) if source_type is not None else "SELECT id, document_id, substr(content,1,12000) AS content, heading_path FROM chunks ORDER BY rowid DESC LIMIT 50000"
             rows = self.database.connection.execute(
-                f"WITH candidates AS MATERIALIZED (SELECT id, document_id, substr(content,1,12000) AS content, heading_path FROM chunks ORDER BY rowid DESC LIMIT 50000) SELECT c.id AS chunk_id, c.document_id, c.content, c.heading_path, d.title, s.original_filename FROM candidates c JOIN documents d ON d.id=c.document_id JOIN sources s ON s.id=d.source_id WHERE ({conditions}) LIMIT ?",
-                (*[like_pattern(t) for t in terms], limit),
+                f"WITH candidates AS MATERIALIZED ({candidates}) SELECT c.id AS chunk_id, c.document_id, c.content, c.heading_path, d.title, s.original_filename FROM candidates c JOIN documents d ON d.id=c.document_id JOIN sources s ON s.id=d.source_id WHERE ({conditions}) LIMIT ?",
+                (*([source_type] if source_type is not None else []), *[like_pattern(t) for t in terms], limit),
             ).fetchall()
             for row in rows:
                 hits[row["chunk_id"]] = {"chunkId": row["chunk_id"], "documentId": row["document_id"], "content": row["content"], "documentTitle": row["title"], "filename": row["original_filename"], "headingPath": row["heading_path"], "lexicalScore": 0.01, "matchedBy": ["bounded_substring"]}

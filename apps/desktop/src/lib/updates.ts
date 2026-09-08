@@ -34,23 +34,40 @@ export const updateErrorCopy: Record<string, string> = {
   update_worker_busy: "仍有资料处理或对话进行中，请完成后再更新。",
   update_save: "笔记尚未保存成功，已停止更新，请先保存笔记。",
 };
-export type ReleaseStatus = { version: string; channel: string; updaterConfigured: boolean; analytics: { enabled: boolean; configured: boolean } };
-export const useReleaseStore = create<{ status: ReleaseStatus; update: UpdateState; visible: boolean; privacyError: string; setVisible: (visible: boolean) => void }>((set) => ({
-  status: { version: APP_VERSION, channel: "stable", updaterConfigured: false, analytics: { enabled: false, configured: false } },
-  update: initialUpdate, visible: false, privacyError: "", setVisible: (visible) => set({ visible }),
+export type AnalyticsChoice = "undecided" | "enabled" | "disabled";
+export type ReleaseStatus = { version: string; channel: string; updaterConfigured: boolean; analytics: { enabled: boolean; configured: boolean; choice?: AnalyticsChoice; needsChoice?: boolean } };
+export const useReleaseStore = create<{ status: ReleaseStatus; update: UpdateState; visible: boolean; privacyError: string; privacySaving: boolean; privacyLoaded: boolean; setVisible: (visible: boolean) => void }>((set) => ({
+  status: { version: APP_VERSION, channel: "stable", updaterConfigured: false, analytics: { enabled: false, configured: false, choice: "undecided", needsChoice: false } },
+  update: initialUpdate, visible: false, privacyError: "", privacySaving: false, privacyLoaded: false, setVisible: (visible) => set({ visible }),
 }));
 let checking = false;
 let installing = false;
+let privacyRevision = 0;
 function dispatch(action: UpdateAction) { useReleaseStore.setState((s) => ({ update: updateReducer(s.update, action) })); }
 export async function refreshReleaseStatus() {
   if (!isTauri()) return;
-  try { const status = await invoke<ReleaseStatus>("release_status"); if (!status?.analytics) return; useReleaseStore.setState({ status }); analytics.setEnabled(status.analytics.enabled); }
-  catch { analytics.setEnabled(false); }
+  const revision = privacyRevision;
+  try {
+    const status = await invoke<ReleaseStatus>("release_status");
+    if (revision !== privacyRevision) return;
+    if (!status?.analytics || typeof status.analytics.enabled !== "boolean") throw new Error("invalid analytics state");
+    // The native layer owns default/migration policy. Never infer enabled before it replies.
+    const safeStatus = { ...status, analytics: { ...status.analytics, enabled: status.analytics.enabled === true } };
+    useReleaseStore.setState({ status: safeStatus, privacyLoaded: true }); analytics.setEnabled(safeStatus.analytics.enabled);
+  }
+  catch {
+    if (revision !== privacyRevision) return;
+    analytics.setEnabled(false);
+    useReleaseStore.setState((s) => ({ privacyLoaded: false, status: { ...s.status, analytics: { ...s.status.analytics, enabled: false } } }));
+  }
 }
 export async function setAnalyticsConsent(enabled: boolean) {
-  analytics.setEnabled(false); useReleaseStore.setState({ privacyError: "" });
+  if (!isTauri() || useReleaseStore.getState().privacySaving) return;
+  privacyRevision += 1;
+  analytics.setEnabled(false); useReleaseStore.setState({ privacyError: "", privacySaving: true });
   try { await invoke("analytics_consent", { enabled }); await refreshReleaseStatus(); }
-  catch { useReleaseStore.setState((s) => ({ privacyError: "无法保存隐私设置，匿名统计保持关闭。", status: { ...s.status, analytics: { ...s.status.analytics, enabled: false } } })); }
+  catch { useReleaseStore.setState((s) => ({ privacyError: "无法保存隐私设置，基础统计保持关闭。请重试。", status: { ...s.status, analytics: { ...s.status.analytics, enabled: false, choice: "undecided" } } })); }
+  finally { useReleaseStore.setState({ privacySaving: false }); }
 }
 export async function checkForUpdate(manual = false) {
   if (!isTauri() || checking || installing) return;

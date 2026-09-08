@@ -88,12 +88,14 @@ class EmbeddingIndexer:
         *,
         provider: str = "openai_compatible",
         batch_size: int = 64,
+        expected_model: str | None = None,
     ) -> None:
         self.database = database
         self.vector_store = vector_store
         self.gateway = gateway
         self.provider = provider
         self.batch_size = batch_size
+        self.expected_model = expected_model
 
     def rebuild(self) -> dict[str, Any]:
         chunks = [dict(row) for row in self.database.connection.execute(
@@ -145,7 +147,7 @@ class EmbeddingIndexer:
             "searchTextVersion": SEARCH_TEXT_VERSION,
         }
 
-    def replace_document(self, document_id: str) -> dict[str, Any]:
+    def replace_document(self, document_id: str, *, allow_rebuild: bool = True) -> dict[str, Any]:
         UUID(document_id)
         chunks = [
             dict(row)
@@ -159,10 +161,41 @@ class EmbeddingIndexer:
         ]
         active = self.database.connection.execute(
             """
-            SELECT id, model, dimension, search_text_version FROM embedding_versions
+            SELECT id, provider, model, dimension, search_text_version FROM embedding_versions
             WHERE active = 1 ORDER BY created_at DESC LIMIT 1
             """
         ).fetchone()
+        if not allow_rebuild and active is None:
+            # First note can initialize its own vectors, but an autosave must
+            # never silently upload every previously imported source.
+            version_id = str(uuid4())
+            vector_rows: list[dict[str, Any]] = []
+            model = None
+            dimension = None
+            for batch in self._batches(chunks):
+                result = self.gateway.embed([str(item["search_text"]) for item in batch])
+                if dimension is not None and result.dimension != dimension:
+                    raise ValueError("Embedding 服务返回了不同维度")
+                model, dimension = result.model, result.dimension
+                vector_rows.extend({"chunk_id": str(chunk["id"]), "document_id": document_id,
+                                    "embedding_version_id": version_id, "vector": vector}
+                                   for chunk, vector in zip(batch, result.vectors, strict=True))
+            if not vector_rows:
+                return {"indexed": 0}
+            self.vector_store.replace_document(document_id, vector_rows)
+            with self.database.transaction() as connection:
+                connection.execute(
+                    "INSERT INTO embedding_versions(id,provider,model,dimension,created_at,active,search_text_version) VALUES (?,?,?,?,?,1,?)",
+                    (version_id, self.provider, model, dimension, utc_now(), SEARCH_TEXT_VERSION),
+                )
+            return {"indexed": len(vector_rows), "model": model, "dimension": dimension}
+        if not allow_rebuild and (active["provider"] != self.provider or
+                (self.expected_model is not None and active["model"] != self.expected_model) or
+                not self.vector_store._exists() or active["search_text_version"] != SEARCH_TEXT_VERSION):
+            # Check the configured model before sending even a first batch.
+            # Detecting a changed model in the response would already disclose
+            # text to the new service before the user's rebuild confirmation.
+            return {"indexed": 0, "requiresRebuild": True}
         if active is None or not self.vector_store._exists() or active["search_text_version"] != SEARCH_TEXT_VERSION:
             return self.rebuild()
         if not chunks:
@@ -177,6 +210,8 @@ class EmbeddingIndexer:
             model = result.model
             dimension = result.dimension
             if model != active["model"] or dimension != active["dimension"]:
+                if not allow_rebuild:
+                    return {"indexed": 0, "requiresRebuild": True}
                 return self.rebuild()
             rows.extend(
                 {

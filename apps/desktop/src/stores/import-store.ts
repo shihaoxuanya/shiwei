@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { chooseFiles, chooseFolder, importPaths, type ImportProgress, type ImportReport } from "../lib/import";
+import { beginLibraryActivity, isLibraryRelocating } from "../lib/library-location";
 
 type ImportStatus = "idle" | "selecting" | "importing" | "success" | "error";
 
@@ -21,7 +22,8 @@ export const useImportStore = create<ImportState>((set, get) => ({
   progress: null,
   error: null,
   addFiles: async () => {
-    if (["importing", "selecting"].includes(get().status)) return;
+    if (isLibraryRelocating() || ["importing", "selecting"].includes(get().status)) return;
+    const done = beginLibraryActivity("正在选择或导入资料");
     set({ status: "selecting", error: null });
     try {
       const paths = await chooseFiles();
@@ -32,10 +34,11 @@ export const useImportStore = create<ImportState>((set, get) => ({
       await get().addPaths(paths);
     } catch (error) {
       set({ status: "error", error: message(error) });
-    }
+    } finally { done(); }
   },
   addFolder: async () => {
-    if (["importing", "selecting"].includes(get().status)) return;
+    if (isLibraryRelocating() || ["importing", "selecting"].includes(get().status)) return;
+    const done = beginLibraryActivity("正在选择或导入资料");
     set({ status: "selecting", error: null });
     try {
       const paths = await chooseFolder();
@@ -46,16 +49,17 @@ export const useImportStore = create<ImportState>((set, get) => ({
       await get().addPaths(paths);
     } catch (error) {
       set({ status: "error", error: message(error) });
-    }
+    } finally { done(); }
   },
   addPaths: async (paths) => {
-    if (get().status === "importing" || !paths.length) return;
+    if (isLibraryRelocating() || get().status === "importing" || !paths.length) return;
+    const done = beginLibraryActivity("正在导入资料");
     set({ status: "importing", error: null, report: null, progress: null });
     try {
       const report = await importPaths(paths, (progress) => set({ progress }));
       set({ status: "success", report, progress: null });
     } catch (error) {
       set({ status: "error", error: message(error) });
-    }
+    } finally { done(); }
   },
 }));

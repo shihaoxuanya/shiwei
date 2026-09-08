@@ -5,12 +5,14 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from threading import Event, Lock
 from uuid import uuid4
 
 from pydantic import ValidationError
 
 from shiwei_ai import __version__
 from shiwei_ai.chat.assistant import Assistant, source_card
+from shiwei_ai.chat.cancellation import CancellableGateway, ChatCancelled
 from shiwei_ai.ingestion import Importer
 from shiwei_ai.ingestion.indexer import LexicalSearch
 from shiwei_ai.models import ModelGateway, ModelGatewayError, ProviderConfig, create_gateway
@@ -19,6 +21,8 @@ from shiwei_ai.retrieval import EmbeddingIndexer, HybridRetriever, LanceVectorSt
 from shiwei_ai.search_projection import SEARCH_TEXT_VERSION
 from shiwei_ai.schemas import PROTOCOL_VERSION, RpcRequest, RpcResponse
 from shiwei_ai.storage.database import utc_now
+from shiwei_ai.storage.library_location import LibraryLocationError, location_config_path, relocate_library
+from shiwei_ai.storage.library_lock import LibraryLockError
 
 logger = logging.getLogger("shiwei.worker")
 Handler = Callable[[dict[str, Any]], dict[str, Any]]
@@ -49,8 +53,13 @@ class WorkerServer:
         self._provider_public: dict[str, Any] | None = None
         self._event_sink = event_sink
         self._active_request_id: str | None = None
+        self._chat_controls: dict[str, Event] = {}
+        self._chat_control_lock = Lock()
         self._handlers: dict[str, Handler] = {
             "ping": self._ping,
+            "worker_info": self._worker_info,
+            "relocate_library": self._relocate_library,
+            "provider_clear": self._provider_clear,
             "import_paths": self._import_paths,
             "list_sources": self._list_sources,
             "delete_source": self._delete_source,
@@ -71,6 +80,7 @@ class WorkerServer:
             "get_note": self._get_note,
             "create_note": self._create_note,
             "update_note": self._update_note,
+            "index_note": self._index_note,
             "delete_note": self._delete_note,
             "shutdown": self._shutdown,
         }
@@ -106,6 +116,10 @@ class WorkerServer:
             return self._encode(RpcResponse.success(request.id, handler(request.params)))
         except WorkerMethodError as error:
             return self._encode(RpcResponse.failure(request.id, error.code, error.message))
+        except (LibraryLocationError, LibraryLockError) as error:
+            return self._encode(RpcResponse.failure(request.id, error.code, str(error)))
+        except ChatCancelled:
+            return self._encode(RpcResponse.failure(request.id, "CHAT_CANCELLED", "已停止本次回答，问题仍保留，可重新发送。"))
         except ModelGatewayError as error:
             return self._encode(RpcResponse.failure(request.id, "PROVIDER_ERROR", str(error)))
         except Exception:
@@ -115,6 +129,11 @@ class WorkerServer:
             )
         finally:
             self._active_request_id = None
+            if request.method == "chat":
+                client_id = request.params.get("clientRequestId")
+                if isinstance(client_id, str):
+                    with self._chat_control_lock:
+                        self._chat_controls.pop(client_id, None)
 
     @staticmethod
     def _encode(response: RpcResponse) -> str:
@@ -144,6 +163,33 @@ class WorkerServer:
         self.should_stop = True
         return {"status": "stopping"}
 
+    def _worker_info(self, _: dict[str, Any]) -> dict[str, Any]:
+        return {**self._ping({}), "dataDir": str(self._get_importer().data_dir.resolve())}
+
+    def _relocate_library(self, params: dict[str, Any]) -> dict[str, Any]:
+        def progress(data: dict[str, Any]) -> None:
+            if self._event_sink is not None:
+                try:
+                    self._event_sink({"jsonrpc": "2.0", "protocol_version": PROTOCOL_VERSION, "event": "library_migration_progress", "requestId": self._active_request_id, "data": data})
+                except Exception:
+                    logger.warning("Library migration progress delivery failed")
+        previous = self._get_importer()
+        current, result = relocate_library(previous, params.get("destinationParent"), location_config_path(), progress)
+        self._importer = current
+        self._data_dir = current.data_dir
+        try:
+            previous.close()
+        except Exception:
+            logger.warning("Previous library handle cleanup failed after relocation")
+        return result
+
+    def _provider_clear(self, _: dict[str, Any]) -> dict[str, Any]:
+        if self._gateway is not None:
+            self._close_gateway(self._gateway)
+        self._gateway = None
+        self._provider_public = None
+        return {"configured": False}
+
     def _get_importer(self) -> Importer:
         if self._importer is None:
             self._importer = Importer(self._data_dir)
@@ -160,7 +206,14 @@ class WorkerServer:
         result = self._get_importer().import_paths(paths, self._emit_job_progress)
         if self._has_embedding() and result["summary"]["imported"] > 0:
             try:
-                result["embeddingIndex"] = self._embedding_indexer().rebuild()
+                self._emit_job_progress({"jobId": result["jobId"], "progress": 1, "currentStep": "资料可按关键词查找，正在准备智能检索", "processed": result["summary"]["imported"], "total": result["summary"]["imported"]})
+                indexed = 0
+                needs_rebuild = False
+                for item in result["imported"]:
+                    partial = self._index_source_vectors(item["sourceId"])
+                    indexed += partial.get("indexed", 0)
+                    needs_rebuild = needs_rebuild or partial.get("requiresRebuild", False)
+                result["embeddingIndex"] = {"indexed": indexed, "requiresRebuild": needs_rebuild}
             except Exception as error:
                 logger.exception("Embedding refresh failed after import")
                 result["embeddingIndex"] = {
@@ -171,18 +224,41 @@ class WorkerServer:
         return result
 
     def _list_sources(self, _: dict[str, Any]) -> dict[str, Any]:
-        return {"sources": self._get_importer().list_sources()}
+        importer = self._get_importer()
+        sources = importer.list_sources()
+        active = importer.database.connection.execute("SELECT id,provider,model,search_text_version FROM embedding_versions WHERE active=1 LIMIT 1").fetchone()
+        enabled = self._has_embedding()
+        compatible = bool(enabled and active and active["provider"] == self._embedding_identity() and active["model"] == (self._provider_public or {}).get("embeddingModel") and active["search_text_version"] == SEARCH_TEXT_VERSION)
+        vector_ids: set[str] = set()
+        vector_error = False
+        if compatible:
+            try:
+                store = LanceVectorStore(importer.data_dir / "index" / "lancedb")
+                if store._exists():
+                    vector_ids = {row["chunk_id"] for row in store.connection.open_table("chunk_embeddings").search().select(["chunk_id"]).limit(50000).to_list()}
+            except Exception:
+                vector_error = True
+        for source in sources:
+            ids = {row[0] for row in importer.database.connection.execute("SELECT c.id FROM chunks c JOIN documents d ON d.id=c.document_id WHERE d.source_id=?", (source["id"],))}
+            source["retrieval"] = {"keyword": "ready" if source["status"] == "searchable" and ids else "unavailable", "semantic": "disabled" if not enabled else "failed" if vector_error else "requires_rebuild" if not compatible else "ready" if ids and ids <= vector_ids else "pending"}
+        return {"sources": sources}
+
+    def _index_source_vectors(self, source_id: str) -> dict[str, Any]:
+        row = self._get_importer().database.connection.execute("SELECT id FROM documents WHERE source_id=?", (source_id,)).fetchone()
+        if row is None:
+            return {"indexed": 0}
+        return self._embedding_indexer().replace_document(row["id"], allow_rebuild=False)
 
     def _delete_source(self, params: dict[str, Any]) -> dict[str, Any]:
         result = self._get_importer().delete_source(self._require_source_id(params))
-        if self._has_embedding():
-            result["embeddingIndex"] = self._embedding_indexer().rebuild()
+        # Deleted chunk identities cannot pass retrieval's SQLite validation.
+        # Deleting a file must never upload every remaining document again.
         return result
 
     def _reindex_source(self, params: dict[str, Any]) -> dict[str, Any]:
         result = self._get_importer().reindex_source(self._require_source_id(params))
         if self._has_embedding():
-            result["embeddingIndex"] = self._embedding_indexer().rebuild()
+            result["embeddingIndex"] = self._index_source_vectors(self._require_source_id(params))
         return result
 
     def _search_lexical(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -192,8 +268,11 @@ class WorkerServer:
         limit = params.get("limit", 20)
         if not isinstance(limit, int) or not 1 <= limit <= 100:
             raise ValueError("limit 必须是 1 到 100 的整数")
+        source_type = params.get("sourceType")
+        if source_type not in (None, "imported_file", "user_note"):
+            raise WorkerMethodError("INVALID_SOURCE_TYPE", "资料类型不正确")
         search = LexicalSearch(self._get_importer().database)
-        return {"query": query, "hits": search.search(query, limit)}
+        return {"query": query, "hits": search.search(query, limit, source_type=source_type)}
 
     def _search_hybrid(self, params: dict[str, Any]) -> dict[str, Any]:
         query = self._require_query(params)
@@ -230,9 +309,19 @@ class WorkerServer:
         return {"configured": True, **self._provider_public}
 
     def _provider_test(self, params: dict[str, Any]) -> dict[str, Any]:
+        target = params.get("target", "all")
+        if target not in {"all", "chat", "embedding"}:
+            raise WorkerMethodError("INVALID_PROVIDER", "无效的测试类型")
+        if target == "chat":
+            params = {**params, "embeddingMode": "none"}
         config = self._provider_config(params)
         gateway = create_gateway(config)
         try:
+            if target == "embedding":
+                if config.embedding_mode == "none":
+                    raise WorkerMethodError("INVALID_PROVIDER", "智能检索未启用")
+                embedding = gateway.embed(["拾微连接测试"])
+                return {"ok": True, "chatOk": False, "embeddingEnabled": True, "embeddingModel": embedding.model, "embeddingDimension": embedding.dimension}
             return gateway.test_connection()
         finally:
             gateway.close()
@@ -259,8 +348,9 @@ class WorkerServer:
         return self._embedding_indexer().rebuild()
 
     def _index_status(self, _: dict[str, Any]) -> dict[str, Any]:
-        database = self._get_importer().database
-        chunk_count = int(database.connection.execute("SELECT count(*) FROM chunks").fetchone()[0])
+        importer = self._get_importer()
+        database = importer.database
+        chunk_ids = {row[0] for row in database.connection.execute("SELECT id FROM chunks")}
         active = database.connection.execute(
             """
             SELECT id, provider, model, dimension, created_at, search_text_version
@@ -268,27 +358,84 @@ class WorkerServer:
             ORDER BY created_at DESC LIMIT 1
             """
         ).fetchone()
+        enabled = self._has_embedding()
+        compatible = bool(active and active["search_text_version"] == SEARCH_TEXT_VERSION
+                          and active["provider"] == self._embedding_identity()
+                          and active["model"] == (self._provider_public or {}).get("embeddingModel"))
+        indexed_ids: set[str] = set()
+        if enabled and compatible and chunk_ids:
+            try:
+                store = LanceVectorStore(importer.data_dir / "index" / "lancedb")
+                if store._exists():
+                    rows = store.connection.open_table("chunk_embeddings").search().select(
+                        ["chunk_id", "embedding_version_id"]
+                    ).limit(50000).to_list()
+                    indexed_ids = {row["chunk_id"] for row in rows if row["embedding_version_id"] == active["id"]}
+            except Exception:
+                # Status inspection is read-only and never triggers a rebuild or
+                # network request. An unreadable index is not reported as ready.
+                pass
         return {
-            "chunkCount": chunk_count,
+            "chunkCount": len(chunk_ids),
             "embeddingVersionId": active["id"] if active else None,
             "provider": active["provider"] if active else None,
             "model": active["model"] if active else None,
             "dimension": active["dimension"] if active else None,
             "lastIndexedAt": active["created_at"] if active else None,
             "searchTextVersion": active["search_text_version"] if active else None,
-            "needsRebuild": bool(active and active["search_text_version"] != SEARCH_TEXT_VERSION),
+            "needsRebuild": bool(enabled and (not compatible or not chunk_ids <= indexed_ids)),
         }
+
+    def prepare_chat(self, client_request_id: str) -> None:
+        # May be called by the stdin reader. It never reads or writes SQLite.
+        with self._chat_control_lock:
+            self._chat_controls.setdefault(client_request_id, Event())
+
+    def cancel_chat(self, client_request_id: str) -> bool:
+        with self._chat_control_lock:
+            event = self._chat_controls.get(client_request_id)
+            if event is None:
+                return False
+            event.set()
+            return True
 
     def _chat(self, params: dict[str, Any]) -> dict[str, Any]:
         query = self._require_query(params)
         conversation_id = params.get("conversationId")
         if conversation_id is not None and not isinstance(conversation_id, str):
             raise WorkerMethodError("INVALID_CONVERSATION", "对话 ID 不正确")
-        history = self._conversation_history(conversation_id) if conversation_id else []
-        answer = Assistant(self._retriever(), self._gateway).ask(query, history, self._emit_chat_token if params.get("stream") is True else None)
-        answer["citations"] = [self._camelize_citation(item) for item in answer["citations"]]
-        answer["conversationId"] = self._save_exchange(conversation_id, query, answer["answer"], answer["citations"], answer)
-        return answer
+        client_id = params.get("clientRequestId", self._active_request_id or str(uuid4()))
+        if not isinstance(client_id, str) or not 1 <= len(client_id) <= 128:
+            raise WorkerMethodError("INVALID_REQUEST", "对话请求标识无效")
+        self.prepare_chat(client_id)
+
+        def check():
+            if self._chat_controls[client_id].is_set():
+                raise ChatCancelled()
+
+        def token(text):
+            check()
+            self._emit_chat_token(text)
+
+        try:
+            check()
+            history = self._conversation_history(conversation_id) if conversation_id else []
+            gateway = CancellableGateway(self._gateway, check) if self._gateway is not None else None
+            answer = Assistant(self._retriever(), gateway).ask(query, history, token if params.get("stream") is True else None)
+            answer["citations"] = [self._camelize_citation(item) for item in answer["citations"]]
+            # Cancellation and the short database commit are serialized: a stop
+            # acknowledged before this block cannot leave a hidden saved reply.
+            with self._chat_control_lock:
+                check()
+                answer["conversationId"] = self._save_exchange(conversation_id, query, answer["answer"], answer["citations"], answer)
+                self._chat_controls.pop(client_id, None)
+            return answer
+        except Exception:
+            check()
+            raise
+        finally:
+            with self._chat_control_lock:
+                self._chat_controls.pop(client_id, None)
 
     def _list_conversations(self, params: dict[str, Any]) -> dict[str, Any]:
         query = params.get("query", "")
@@ -443,19 +590,19 @@ class WorkerServer:
         if not isinstance(query, str):
             raise WorkerMethodError("INVALID_QUERY", "笔记搜索内容不正确")
         try:
-            return {"notes": self._note_service().list(query)}
+            return {"notes": [self._note_retrieval_status(note) for note in self._note_service().list(query)]}
         except ValueError as error:
             raise WorkerMethodError("INVALID_NOTE", str(error)) from error
 
     def _get_note(self, params: dict[str, Any]) -> dict[str, Any]:
         note_id = self._require_note_id(params)
         try:
-            return {"note": self._note_service().get(note_id)}
+            return {"note": self._note_retrieval_status(self._note_service().get(note_id))}
         except ValueError as error:
             raise WorkerMethodError("NOTE_NOT_FOUND", str(error)) from error
 
     def _create_note(self, _: dict[str, Any]) -> dict[str, Any]:
-        return {"note": self._note_service().create()}
+        return {"note": self._note_retrieval_status(self._note_service().create())}
 
     def _update_note(self, params: dict[str, Any]) -> dict[str, Any]:
         note_id = self._require_note_id(params)
@@ -467,24 +614,64 @@ class WorkerServer:
             note = self._note_service().update(note_id, title, content)
         except ValueError as error:
             raise WorkerMethodError("INVALID_NOTE", str(error)) from error
-        document_id = note.get("documentId")
         previous_document_id = note.pop("previousDocumentId", None)
-        if self._has_embedding():
+        # Local truth and FTS are durable before any optional network operation.
+        # Immutable chunk IDs invalidate previous vectors immediately on edit.
+        if not note.get("documentId") and previous_document_id:
             try:
-                if document_id:
-                    note["embeddingIndex"] = self._embedding_indexer().replace_document(document_id)
-                elif previous_document_id:
-                    vector_store = LanceVectorStore(self._get_importer().data_dir / "index" / "lancedb")
-                    vector_store.delete_document(previous_document_id)
-                    note["embeddingIndex"] = {"indexed": 0}
-            except Exception as error:
-                logger.exception("Embedding refresh failed after note update")
-                note["embeddingIndex"] = {
-                    "status": "failed",
-                    "message": "笔记已保存并可全文搜索，但语义索引更新失败",
-                    "reason": str(error),
-                }
-        return {"note": note}
+                LanceVectorStore(self._get_importer().data_dir / "index" / "lancedb").delete_document(previous_document_id)
+            except Exception:
+                logger.warning("Deferred invalid note vector cleanup")
+        return {"note": self._note_retrieval_status(note)}
+
+    def _note_retrieval_status(self, note: dict[str, Any]) -> dict[str, Any]:
+        retrieval = note["retrieval"]
+        retrieval["semantic"] = "disabled" if not self._has_embedding() else "empty" if retrieval["keyword"] == "empty" else "pending"
+        row = self._get_importer().database.connection.execute(
+            "SELECT value_json FROM settings WHERE key=?", (f"note_retrieval:{note['id']}",)
+        ).fetchone()
+        if row and self._has_embedding():
+            try:
+                saved = json.loads(row["value_json"])
+                if saved.get("revision") == note["updatedAt"] and saved.get("provider") == self._embedding_identity() and saved.get("model") == (self._provider_public or {}).get("embeddingModel"):
+                    retrieval["semantic"] = saved["state"]
+            except (ValueError, KeyError, TypeError):
+                pass
+        return note
+
+    def _index_note(self, params: dict[str, Any]) -> dict[str, Any]:
+        note_id = self._require_note_id(params)
+        revision = params.get("revision")
+        if not isinstance(revision, str) or not revision:
+            raise WorkerMethodError("INVALID_NOTE", "缺少笔记保存版本")
+        try:
+            note = self._note_service().get(note_id)
+        except ValueError:
+            return {"skipped": "deleted"}
+        # Dispatcher is the sole writer: version validation and indexing run in
+        # one serialized request. An older queued edit never re-indexes new truth.
+        if note["updatedAt"] != revision:
+            return {"skipped": "stale_revision", "note": self._note_retrieval_status(note)}
+        if not self._has_embedding() or note["retrieval"]["keyword"] != "ready":
+            return {"note": self._note_retrieval_status(note)}
+        document = self._get_importer().database.connection.execute(
+            "SELECT id FROM documents WHERE source_id=?", (note["sourceId"],)
+        ).fetchone()
+        state = "ready"
+        try:
+            result = self._embedding_indexer().replace_document(document["id"], allow_rebuild=False)
+            if result.get("requiresRebuild"):
+                state = "requires_rebuild"
+        except Exception:
+            logger.warning("Optional note semantic indexing failed; local note remains searchable")
+            state = "failed"
+        marker = {"revision": revision, "state": state, "provider": self._embedding_identity(), "model": (self._provider_public or {}).get("embeddingModel")}
+        with self._get_importer().database.transaction() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO settings(key,value_json,updated_at) VALUES (?,?,?)",
+                (f"note_retrieval:{note_id}", json.dumps(marker), utc_now()),
+            )
+        return {"note": self._note_retrieval_status(note)}
 
     def _delete_note(self, params: dict[str, Any]) -> dict[str, Any]:
         note_id = self._require_note_id(params)
@@ -645,6 +832,7 @@ class WorkerServer:
             self._gateway,
             provider=self._embedding_identity(),
             batch_size=16,
+            expected_model=(self._provider_public or {}).get("embeddingModel"),
         )
 
     @staticmethod

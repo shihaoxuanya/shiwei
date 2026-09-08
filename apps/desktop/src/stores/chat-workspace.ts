@@ -1,6 +1,7 @@
 import { createStore } from "zustand/vanilla";
 import {
   askKnowledge,
+  cancelChat,
   deleteConversation,
   getConversation,
   listConversations,
@@ -15,7 +16,7 @@ export type ChatSession = {
   draft: string;
   messages: ConversationMessage[];
   streaming: string;
-  status: "idle" | "loading" | "searching" | "error";
+  status: "idle" | "loading" | "searching" | "stopping" | "stopped" | "error";
   error?: string;
   failed?: { id: string; query: string };
   loaded: boolean;
@@ -37,7 +38,9 @@ type Workspace = {
   newConversation: () => void;
   select: (id: string) => Promise<void>;
   refresh: (query?: string, more?: boolean) => Promise<void>;
+  refreshAfterRelocation: () => Promise<void>;
   send: (text?: string, retry?: { id: string; query: string }) => Promise<void>;
+  stop: () => Promise<void>;
   removeConversation: (id: string) => Promise<void>;
 };
 
@@ -152,6 +155,28 @@ export function createChatWorkspace() {
         if (epoch === historyEpoch) set({ historyLoading: false });
       }
     },
+    refreshAfterRelocation: async () => {
+      if (get().pending) return;
+      const snapshots = Object.values(get().sessions).filter(
+        (session) => session.loaded && session.conversationId,
+      );
+      const results = await Promise.allSettled(snapshots.map(async (snapshot) => {
+        const conversation = await getConversation(snapshot.conversationId!);
+        const current = get().sessions[snapshot.key];
+        // Reload path-bearing metadata from SQLite joins, never rewrite user
+        // text or discard an in-memory draft. A late refresh cannot replace a
+        // new reply, deleted conversation or messages loaded by another action.
+        if (get().pending || !current || current.conversationId !== snapshot.conversationId
+          || current.messages !== snapshot.messages) return;
+        get().patch(snapshot.key, {
+          messages: conversation.messages,
+          title: conversation.title,
+        });
+      }));
+      if (results.some(result => result.status === "rejected")) {
+        throw new Error("资料库位置已更改，但部分对话来源暂未刷新，请稍后重试。");
+      }
+    },
     send: async (text, retry) => {
       const key = get().selected;
       const session = get().sessions[key];
@@ -185,16 +210,18 @@ export function createChatWorkspace() {
           query,
           session.conversationId,
           (token) => {
-            if (get().pending?.requestId === requestId)
+            if (get().pending?.requestId === requestId && get().sessions[key]?.status !== "stopping")
               get().patch(key, {
                 streaming: get().sessions[key].streaming + token,
               });
           },
           requestId,
         );
+        if (get().pending?.requestId !== requestId || !get().sessions[key]) return;
         get().patch(key, {
           conversationId: answer.conversationId,
           status: "idle",
+          error: undefined,
           streaming: "",
           unread: get().selected !== key,
           messages: [
@@ -213,15 +240,29 @@ export function createChatWorkspace() {
         });
         void get().refresh();
       } catch (reason) {
+        if (get().pending?.requestId !== requestId || !get().sessions[key]) return;
+        const message = reason instanceof Error ? reason.message : String(reason);
+        const cancelled = message.includes("已停止本次回答");
         get().patch(key, {
-          status: "error",
+          status: cancelled ? "stopped" : "error",
           streaming: "",
-          error: reason instanceof Error ? reason.message : String(reason),
+          error: cancelled ? undefined : message,
           failed: { id: userId, query },
           unread: get().selected !== key,
         });
       } finally {
         if (get().pending?.requestId === requestId) set({ pending: undefined });
+      }
+    },
+    stop: async () => {
+      const pending = get().pending;
+      if (!pending || get().sessions[pending.key].status === "stopping") return;
+      get().patch(pending.key, { status: "stopping", error: undefined });
+      try {
+        await cancelChat(pending.requestId);
+      } catch {
+        if (get().pending?.requestId === pending.requestId)
+          get().patch(pending.key, { status: "searching", error: "停止请求未能送达，回答仍在进行。请重试停止。" });
       }
     },
     removeConversation: async (id) => {

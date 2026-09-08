@@ -2,6 +2,7 @@ mod analytics;
 mod provider_store;
 mod updates;
 mod worker_client;
+mod library_location;
 
 use provider_store::{ProviderInput, ProviderStatus};
 use serde::{Deserialize, Serialize};
@@ -81,6 +82,8 @@ struct ImportReport {
     skipped: Vec<ImportItem>,
     failed: Vec<ImportFailure>,
     summary: ImportSummary,
+    #[serde(default)]
+    embedding_index: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -96,6 +99,8 @@ struct SourceSummary {
     imported_at: String,
     status: String,
     error: Option<String>,
+    #[serde(default)]
+    retrieval: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,6 +119,11 @@ struct LexicalHit {
     heading_path: Option<String>,
     lexical_score: f64,
     matched_by: Vec<String>,
+    source_id: Option<String>,
+    source_type: Option<String>,
+    page_number: Option<u32>,
+    sheet_name: Option<String>,
+    slide_number: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,6 +139,38 @@ async fn worker_ping(state: State<'_, WorkerState>) -> Result<WorkerPingResult, 
         .await
         .map_err(|error| format!("Worker 调用任务异常：{error}"))?
         .map_err(|error| error.user_message())
+}
+
+#[tauri::command]
+async fn worker_info(state: State<'_, WorkerState>) -> Result<serde_json::Value, String> {
+    let client = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || client.request("worker_info", serde_json::json!({})))
+        .await.map_err(|_| "读取本地数据位置失败".to_string())?.map_err(|e| e.user_message())
+}
+
+#[tauri::command]
+async fn library_relocate(app: tauri::AppHandle, state: State<'_, WorkerState>, destination_parent: String) -> Result<serde_json::Value, String> {
+    let destination = PathBuf::from(&destination_parent);
+    if !destination.is_absolute() || destination_parent.len() > 32768 || destination_parent.contains('\0') {
+        return Err("请选择有效的本地文件夹".into());
+    }
+    let client = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || client.relocate_library(
+        serde_json::json!({"destinationParent": destination_parent}),
+        move |event| {
+            if event.get("event").and_then(|v| v.as_str()) == Some("library_migration_progress") {
+                if let Some(data) = event.get("data") { let _ = app.emit("library-migration-progress", data.clone()); }
+            }
+        },
+    )).await.map_err(|_| "迁移任务中断，请重新打开应用确认当前资料库位置；原库仍保留。".to_string())?
+      .map_err(|error| error.user_message())
+}
+
+#[tauri::command]
+async fn index_note(state: State<'_, WorkerState>, note_id: String, revision: String) -> Result<serde_json::Value, String> {
+    let client = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || client.request("index_note", serde_json::json!({"noteId":note_id,"revision":revision})))
+        .await.map_err(|_| "更新笔记搜索失败".to_string())?.map_err(|e| e.user_message())
 }
 
 #[tauri::command]
@@ -204,12 +246,13 @@ async fn search_lexical(
     state: State<'_, WorkerState>,
     query: String,
     limit: Option<u32>,
+    source_type: Option<String>,
 ) -> Result<Vec<LexicalHit>, String> {
     let client = state.0.clone();
     let result: LexicalSearchResult = tauri::async_runtime::spawn_blocking(move || {
         client.request(
             "search_lexical",
-            serde_json::json!({ "query": query, "limit": limit.unwrap_or(20) }),
+            serde_json::json!({ "query": query, "limit": limit.unwrap_or(20), "sourceType": source_type }),
         )
     })
     .await
@@ -225,22 +268,58 @@ async fn provider_status(app: tauri::AppHandle) -> Result<ProviderStatus, String
 }
 
 #[tauri::command]
+fn provider_help(app: tauri::AppHandle, provider_id: String) -> Result<(), String> {
+    let url = match provider_id.as_str() {
+        "deepseek" => "https://api-docs.deepseek.com/",
+        "qwen" => "https://help.aliyun.com/zh/model-studio/get-api-key",
+        _ => return Err("尚未核实该服务商的帮助地址，请查看官方控制台".into()),
+    };
+    app.opener().open_url(url, None::<&str>).map_err(|_| "无法打开官方帮助页面".into())
+}
+
+#[tauri::command]
 async fn provider_test(
     app: tauri::AppHandle,
     state: State<'_, WorkerState>,
-    config: ProviderInput,
+    mut config: ProviderInput,
+    target: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let (public, api_key, embedding_key) = provider_store::resolve_for_request(&app, config)?;
+    let target = target.unwrap_or_else(|| "all".into());
+    if !["all", "chat", "embedding"].contains(&target.as_str()) { return Err("无效的测试类型".into()); }
+    if target == "chat" { config.public.embedding_mode = "none".into(); }
+    let (public, api_key, embedding_key) = if target == "embedding" {
+        provider_store::resolve_embedding_test(&app, config)?
+    } else { provider_store::resolve_for_request(&app, config)? };
+    let mut params = public.worker_params(api_key, embedding_key);
+    params["target"] = serde_json::json!(target);
     let client = state.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
         client.request(
             "provider_test",
-            public.worker_params(api_key, embedding_key),
+            params,
         )
     })
     .await
     .map_err(|error| format!("模型测试任务异常：{error}"))?
     .map_err(|error| error.user_message())
+}
+
+#[tauri::command]
+async fn provider_clear_key(app: tauri::AppHandle, state: State<'_, WorkerState>, target: String) -> Result<(), String> {
+    if !["chat", "embedding"].contains(&target.as_str()) { return Err("无效的凭据类型".into()); }
+    // First revoke the live client. If keyring/config persistence fails, the
+    // worker must not keep using a credential the user has asked to remove.
+    let clear_client = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || clear_client.request::<serde_json::Value>("provider_clear", serde_json::json!({})))
+        .await.map_err(|_| "停用当前模型连接失败，凭据未清除".to_string())?.map_err(|e| e.user_message())?;
+    provider_store::clear_key(&app, &target)?;
+    let params = provider_store::runtime_params(&app)?;
+    let client = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(params) = params { client.request::<serde_json::Value>("provider_configure", params) }
+        else { client.request::<serde_json::Value>("provider_clear", serde_json::json!({})) }
+    }).await.map_err(|_| "清除模型凭据失败".to_string())?.map_err(|e| e.user_message())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -338,6 +417,7 @@ async fn chat_ask(
             serde_json::json!({
                 "query": query,
                 "conversationId": conversation_id,
+                "clientRequestId": request_id,
                 "stream": true
             }),
             move |event| {
@@ -366,6 +446,17 @@ async fn chat_ask(
         }
     }
     result
+}
+
+#[tauri::command]
+async fn chat_cancel(state: State<'_, WorkerState>, request_id: String) -> Result<(), String> {
+    if uuid::Uuid::parse_str(&request_id).is_err() {
+        return Err("对话请求标识无效".into());
+    }
+    let client = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || client.cancel_chat(&request_id))
+        .await.map_err(|_| "停止请求未能送达，请重试".to_string())?
+        .map_err(|error| error.user_message())
 }
 
 #[tauri::command]
@@ -568,6 +659,9 @@ pub fn run() {
         .manage(updates::UpdateState::default())
         .manage(WorkerState(worker))
         .setup(move |app| {
+            let location_path = library_location::config_path(app.handle())
+                .map_err(std::io::Error::other)?;
+            startup_worker.set_location_config(location_path)?;
             // Release metadata is separate from the user's knowledge DB; failures are fail-closed.
             let path = app
                 .path()
@@ -592,6 +686,11 @@ pub fn run() {
             }
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.state::<WorkerState>().0.is_relocating() { api.prevent_close(); }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             release_status,
             analytics_consent,
@@ -599,11 +698,14 @@ pub fn run() {
             updates::update_check,
             updates::update_install,
             worker_ping,
+            worker_info,
+            library_relocate,
             import_paths,
             list_sources,
             search_lexical,
             search_hybrid,
             chat_ask,
+            chat_cancel,
             list_conversations,
             get_conversation,
             delete_conversation,
@@ -611,9 +713,12 @@ pub fn run() {
             get_note,
             create_note,
             update_note,
+            index_note,
             delete_note,
             provider_status,
+            provider_help,
             provider_test,
+            provider_clear_key,
             provider_models,
             provider_save,
             rebuild_embeddings,
@@ -629,6 +734,11 @@ pub fn run() {
 
 impl WorkerError {
     fn user_message(&self) -> String {
+        if let WorkerError::Remote { code, message } = self {
+            if code == "CHAT_CANCELLED" || code.starts_with("LIBRARY_") {
+                return message.clone(); // User-requested stop is not an error statistic.
+            }
+        }
         let kind = match self {
             WorkerError::Exited => "worker_exited",
             WorkerError::Timeout => "worker_timeout",

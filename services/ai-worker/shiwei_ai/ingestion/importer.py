@@ -13,6 +13,8 @@ from platformdirs import user_data_path
 
 from shiwei_ai.storage.database import Database, utc_now
 from shiwei_ai.storage.raw_store import RawStore
+from shiwei_ai.storage.library_location import configured_data_dir
+from shiwei_ai.storage.library_lock import LibraryLock
 from shiwei_ai.ingestion.indexer import DocumentIndexer
 
 logger = logging.getLogger("shiwei.ingestion")
@@ -35,6 +37,9 @@ SUPPORTED_EXTENSIONS = {
 
 
 def default_data_dir() -> Path:
+    selected = configured_data_dir()
+    if selected is not None:
+        return selected
     configured = os.environ.get("SHIWEI_DATA_DIR")
     if configured:
         return Path(configured).expanduser().resolve()
@@ -44,15 +49,30 @@ def default_data_dir() -> Path:
 class Importer:
     def __init__(self, data_dir: Path | None = None) -> None:
         self.data_dir = (data_dir or default_data_dir()).resolve()
-        self.raw_store = RawStore(self.data_dir / "raw")
-        for directory in ["parsed", "index", "cache", "logs"]:
-            (self.data_dir / directory).mkdir(parents=True, exist_ok=True)
-        self.database = Database(self.data_dir / "shiwei.db")
-        self.indexer = DocumentIndexer(self.database, self.data_dir / "parsed")
-        self.database.recover_interrupted_jobs()
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self._lease = LibraryLock(self.data_dir)
+        self._closed = False
+        try:
+            self.raw_store = RawStore(self.data_dir / "raw")
+            for directory in ["parsed", "index", "cache", "logs"]:
+                (self.data_dir / directory).mkdir(parents=True, exist_ok=True)
+            self.database = Database(self.data_dir / "shiwei.db")
+            self.indexer = DocumentIndexer(self.database, self.data_dir / "parsed")
+            self.database.recover_interrupted_jobs()
+        except Exception:
+            if hasattr(self, "database"):
+                self.database.close()
+            self._lease.close()
+            raise
 
     def close(self) -> None:
-        self.database.close()
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self.database.close()
+        finally:
+            self._lease.close()
 
     def import_paths(
         self,

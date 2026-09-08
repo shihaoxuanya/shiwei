@@ -1,4 +1,4 @@
-//! Content-free control plane. New release installs default on; existing choices persist.
+//! Optional content-free control plane. Production defaults on; saved opt-outs always win.
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::{
@@ -122,13 +122,27 @@ fn number_field(input: &Value, output: &mut Map<String, Value>, key: &str) {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsentChoice {
+    Undecided,
+    Enabled,
+    Disabled,
+}
+
 #[derive(Serialize, Deserialize)]
-#[serde(default)]
 struct Installation {
     installation_id: String,
     enabled: bool,
+    // Keep legacy preference compatibility. This marker records the effective choice;
+    // enabled also includes the current production default and is not proof of opt-in.
+    #[serde(default)]
+    consent_choice: Option<ConsentChoice>,
+    #[serde(default)]
     install_reported: bool,
+    #[serde(default)]
     first_recall_seen: bool,
+    #[serde(default)]
     pending_update: Option<String>,
 }
 impl Default for Installation {
@@ -136,6 +150,7 @@ impl Default for Installation {
         Self {
             installation_id: Uuid::new_v4().to_string(),
             enabled: false,
+            consent_choice: Some(ConsentChoice::Disabled),
             install_reported: false,
             first_recall_seen: false,
             pending_update: None,
@@ -147,12 +162,15 @@ impl Default for Installation {
 pub struct AnalyticsStatus {
     pub enabled: bool,
     pub configured: bool,
+    pub choice: ConsentChoice,
+    pub needs_choice: bool,
 }
 
 pub struct AnalyticsService {
     state: Mutex<Installation>,
     path: Option<PathBuf>,
     provider: MetadataAnalyticsProvider,
+    transport_allowed: bool,
     consent: watch::Sender<(bool, u64)>,
     slots: Arc<Semaphore>,
     #[cfg(test)]
@@ -182,35 +200,54 @@ impl MetadataAnalyticsProvider {
 }
 impl AnalyticsService {
     pub fn new(path: PathBuf, host: &str, key: &str) -> Self {
-        // A development build must not create synthetic production analytics by default.
-        Self::new_with_default(path, host, key, !cfg!(debug_assertions))
+        // Development builds never send production statistics, even with a saved choice.
+        Self::new_with_transport(path, host, key, !cfg!(debug_assertions))
     }
-    fn new_with_default(path: PathBuf, host: &str, key: &str, new_install_enabled: bool) -> Self {
-        let missing = !path.exists();
-        let mut state = fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Installation>(&b).ok())
-            .filter(|s| {
+    fn new_with_transport(path: PathBuf, host: &str, key: &str, transport_allowed: bool) -> Self {
+        // Only a genuinely missing file is a new installation. Unreadable/malformed
+        // preferences must not become default-on, including on the following restart.
+        let mut state = match fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice::<Installation>(&bytes).ok().filter(|s| {
                 Uuid::parse_str(&s.installation_id).is_ok_and(|id| id.get_version_num() == 4)
-            })
-            .unwrap_or_default();
-        // Existing false (including old opt-in defaults) stays false. Unreadable/corrupt
-        // settings fail closed rather than silently re-enabling telemetry on an upgrade.
-        if missing {
-            state.enabled = new_install_enabled;
+            }).unwrap_or_default(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Installation {
+                enabled: true, consent_choice: Some(ConsentChoice::Enabled), ..Installation::default()
+            },
+            Err(_) => Installation::default(),
+        };
+        let mut choice = state.consent_choice.unwrap_or(if state.enabled {
+            ConsentChoice::Enabled
+        } else {
+            // Preserve every legacy false, including old off defaults.
+            ConsentChoice::Disabled
+        });
+        // A stored off value wins if a partially migrated setting is inconsistent.
+        if !state.enabled && choice == ConsentChoice::Enabled {
+            choice = ConsentChoice::Disabled;
         }
+        // The latest product decision removes the undecided step, but not opt-outs.
+        if choice == ConsentChoice::Undecided {
+            choice = ConsentChoice::Enabled;
+        }
+        state.consent_choice = Some(choice);
+        state.enabled = choice == ConsentChoice::Enabled;
         let (consent, _) = watch::channel((state.enabled, 0));
         let result = Self {
             state: Mutex::new(state),
             path: Some(path),
             provider: MetadataAnalyticsProvider::new(host, key),
+            transport_allowed,
             consent,
             slots: Arc::new(Semaphore::new(8)),
             #[cfg(test)]
             observer: None,
         };
         if result.save().is_err() {
-            let _ = result.set_enabled(false);
+            if let Ok(mut state) = result.state.lock() {
+                state.enabled = false;
+                state.consent_choice = Some(ConsentChoice::Disabled);
+            }
+            result.consent.send_replace((false, 1));
         }
         result
     }
@@ -229,9 +266,21 @@ impl AnalyticsService {
         self.save_locked(&state)
     }
     pub fn status(&self) -> AnalyticsStatus {
+        let (enabled, choice) = self
+            .state
+            .lock()
+            .map(|s| {
+                (
+                    s.enabled,
+                    s.consent_choice.unwrap_or(ConsentChoice::Undecided),
+                )
+            })
+            .unwrap_or((false, ConsentChoice::Undecided));
         AnalyticsStatus {
-            enabled: self.state.lock().map(|s| s.enabled).unwrap_or(false),
+            enabled,
             configured: self.provider.configured(),
+            choice,
+            needs_choice: false,
         }
     }
     // Functional update cohort identifier, not telemetry consent. Native only.
@@ -247,8 +296,14 @@ impl AnalyticsService {
         let epoch = self.consent.borrow().1 + 1;
         self.consent.send_replace((false, epoch));
         state.enabled = enabled;
+        state.consent_choice = Some(if enabled {
+            ConsentChoice::Enabled
+        } else {
+            ConsentChoice::Disabled
+        });
         if let Err(e) = self.save_locked(&state) {
             state.enabled = false;
+            state.consent_choice = Some(ConsentChoice::Disabled);
             return Err(e);
         }
         self.consent.send_replace((enabled, epoch));
@@ -264,7 +319,10 @@ impl AnalyticsService {
             let Ok(mut state) = self.state.lock() else {
                 return;
             };
-            let installed = state.enabled && !state.install_reported && self.provider.configured();
+            let installed = state.enabled
+                && self.transport_allowed
+                && !state.install_reported
+                && self.provider.configured();
             if installed {
                 state.install_reported = true;
             }
@@ -313,13 +371,16 @@ impl AnalyticsService {
         // old queued event a new consent generation.
         let mut consent = self.consent.subscribe();
         let generation = *consent.borrow();
-        if !generation.0 {
+        if !generation.0 || !self.transport_allowed {
             return;
         }
         let Ok(state) = self.state.lock() else {
             return;
         };
-        if !state.enabled || !self.provider.configured() {
+        if !state.enabled
+            || state.consent_choice != Some(ConsentChoice::Enabled)
+            || !self.provider.configured()
+        {
             return;
         }
         let Ok(permit) = self.slots.clone().try_acquire_owned() else {
@@ -427,6 +488,7 @@ impl AnalyticsService {
             state: Mutex::new(Installation::default()),
             path: None,
             provider: MetadataAnalyticsProvider::new("", ""),
+            transport_allowed: false,
             consent: watch::channel((false, 0)).0,
             slots: Arc::new(Semaphore::new(8)),
             #[cfg(test)]
@@ -454,10 +516,11 @@ mod tests {
         let path = directory.path().join("installation.json");
         let delivered = Arc::new(Mutex::new(Vec::<Value>::new()));
         for _ in 0..2 {
-            let mut service = AnalyticsService::new(
+            let mut service = AnalyticsService::new_with_transport(
                 path.clone(),
                 "https://example.invalid",
                 "phc_test_public_project",
+                true,
             );
             let captured = delivered.clone();
             service.observer = Some(Arc::new(move |body| {
@@ -525,74 +588,116 @@ mod tests {
         assert_ne!(*service.consent.borrow(), first);
     }
     #[test]
-    fn installation_persists_and_defaults_off() {
+    fn installation_persists_and_defaults_on() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("installation.json");
         let a = AnalyticsService::new(path.clone(), "", "");
         let id = a.state.lock().unwrap().installation_id.clone();
         assert_eq!(Uuid::parse_str(&id).unwrap().get_version_num(), 4);
-        assert!(!a.status().enabled);
+        assert!(a.status().enabled);
         let b = AnalyticsService::new(path, "", "");
         assert_eq!(b.state.lock().unwrap().installation_id, id);
     }
     #[test]
-    fn release_default_on_preserves_existing_disabled_and_corrupt_preferences() {
+    fn release_defaults_on_and_preserves_disabled_and_corrupt_preferences() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("installation.json");
         let service =
-            AnalyticsService::new_with_default(path.clone(), "https://example.invalid", "", true);
+            AnalyticsService::new_with_transport(path.clone(), "https://example.invalid", "", true);
         assert!(service.status().enabled && service.status().configured);
+        assert_eq!(service.status().choice, ConsentChoice::Enabled);
+        assert!(!service.status().needs_choice);
         service.set_enabled(false).unwrap();
         let old_id = service.update_installation_id().unwrap();
         let upgraded =
-            AnalyticsService::new_with_default(path.clone(), "https://example.invalid", "", true);
+            AnalyticsService::new_with_transport(path.clone(), "https://example.invalid", "", true);
         assert!(!upgraded.status().enabled);
+        assert_eq!(upgraded.status().choice, ConsentChoice::Disabled);
+        assert!(!upgraded.status().needs_choice);
         assert_eq!(upgraded.update_installation_id().unwrap(), old_id);
         fs::write(&path, b"broken json").unwrap();
-        assert!(
-            !AnalyticsService::new_with_default(path, "https://example.invalid", "", true)
-                .status()
-                .enabled
-        );
+        for _ in 0..2 {
+            assert!(!AnalyticsService::new_with_transport(path.clone(), "https://example.invalid", "", true).status().enabled);
+        }
     }
     #[test]
-    fn release_default_is_checked_across_restarts_until_explicitly_disabled() {
+    fn legacy_true_stays_on_without_changing_update_identity() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("installation.json");
+        let id = Uuid::new_v4().to_string();
+        fs::write(
+            &path,
+            serde_json::to_vec(
+                &json!({"installation_id": id, "enabled": true, "pending_update": "0.3.2"}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
         for _ in 0..2 {
-            let service = AnalyticsService::new_with_default(
+            let service = AnalyticsService::new_with_transport(
                 path.clone(),
                 "https://example.invalid",
                 "",
                 true,
             );
             assert!(service.status().enabled);
+            assert!(!service.status().needs_choice);
+            assert_eq!(service.update_installation_id().unwrap(), id);
+            assert_eq!(
+                service.state.lock().unwrap().pending_update.as_deref(),
+                Some("0.3.2")
+            );
             assert_eq!(
                 serde_json::from_slice::<Value>(&fs::read(&path).unwrap()).unwrap()["enabled"],
                 true
             );
         }
         let service =
-            AnalyticsService::new_with_default(path.clone(), "https://example.invalid", "", true);
-        service.set_enabled(false).unwrap();
+            AnalyticsService::new_with_transport(path.clone(), "https://example.invalid", "", true);
+        service.set_enabled(true).unwrap();
         for _ in 0..2 {
-            assert!(
-                !AnalyticsService::new_with_default(
-                    path.clone(),
-                    "https://example.invalid",
-                    "",
-                    true
-                )
-                .status()
-                .enabled
+            let restored = AnalyticsService::new_with_transport(
+                path.clone(),
+                "https://example.invalid",
+                "",
+                true,
             );
+            assert!(restored.status().enabled);
+            assert_eq!(restored.status().choice, ConsentChoice::Enabled);
+            assert!(!restored.status().needs_choice);
         }
     }
     #[test]
-    fn first_party_envelope_has_only_allowlisted_metadata_and_random_event_ids() {
+    fn legacy_false_stays_disabled_and_is_not_reprompted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installation.json");
+        let id = Uuid::new_v4().to_string();
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({"installation_id": id, "enabled": false})).unwrap(),
+        )
+        .unwrap();
+        let service =
+            AnalyticsService::new_with_transport(path, "https://example.invalid", "", true);
+        assert_eq!(service.status().choice, ConsentChoice::Disabled);
+        assert!(!service.status().enabled && !service.status().needs_choice);
+        assert_eq!(service.update_installation_id().unwrap(), id);
+    }
+    #[test]
+    fn inconsistent_choice_marker_cannot_override_a_saved_off_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installation.json");
+        fs::write(&path, serde_json::to_vec(&json!({"installation_id": Uuid::new_v4().to_string(), "enabled": false, "consent_choice": "enabled"})).unwrap()).unwrap();
+        let service =
+            AnalyticsService::new_with_transport(path, "https://example.invalid", "", true);
+        assert_eq!(service.status().choice, ConsentChoice::Disabled);
+        assert!(!service.status().enabled);
+    }
+    #[test]
+    fn no_events_after_disable_and_no_backfill_on_reenable() {
         let dir = tempfile::tempdir().unwrap();
         let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
-        let mut service = AnalyticsService::new_with_default(
+        let mut service = AnalyticsService::new_with_transport(
             dir.path().join("installation.json"),
             "https://example.invalid",
             "",
@@ -602,6 +707,100 @@ mod tests {
         service.observer = Some(Arc::new(move |body| {
             observer.lock().unwrap().push(body.clone())
         }));
+        let service = Arc::new(service);
+        service.set_enabled(false).unwrap();
+        service.opened();
+        service.track("question_asked", json!({}));
+        service.track("retrieval_succeeded", json!({}));
+        assert!(captured.lock().unwrap().is_empty());
+        assert_eq!(service.slots.available_permits(), 8);
+        service.set_enabled(true).unwrap();
+        service.track("note_created", json!({}));
+        assert_eq!(captured.lock().unwrap().len(), 1);
+        service.set_enabled(false).unwrap();
+        service.track("import_completed", json!({"success_count": 1}));
+        service.set_enabled(true).unwrap();
+        assert_eq!(captured.lock().unwrap().len(), 1);
+        service.track("retrieval_succeeded", json!({}));
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(!events
+            .iter()
+            .any(|event| event["event"] == "first_successful_recall"
+                || event["event"] == "import_completed"));
+    }
+    #[test]
+    fn previous_undecided_migrates_on_but_explicit_disabled_wins_over_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installation.json");
+        for (choice, saved, expected) in [("undecided", false, true), ("undecided", true, true), ("disabled", true, false)] {
+            fs::write(&path, serde_json::to_vec(&json!({"installation_id": Uuid::new_v4().to_string(), "enabled": saved, "consent_choice": choice})).unwrap()).unwrap();
+            let service = AnalyticsService::new_with_transport(path.clone(), "https://example.invalid", "", true);
+            assert_eq!(service.status().enabled, expected);
+            assert!(!service.status().needs_choice);
+        }
+    }
+    #[test]
+    fn invalid_or_unreadable_existing_settings_fail_closed_not_new_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installation.json");
+        for bytes in ["{}", "{\"enabled\":true}", "{\"installation_id\":\"invalid\",\"enabled\":true}"] {
+            fs::write(&path, bytes).unwrap();
+            assert!(!AnalyticsService::new_with_transport(path.clone(), "https://example.invalid", "", true).status().enabled);
+        }
+        let unreadable = dir.path().join("directory-not-file");
+        fs::create_dir(&unreadable).unwrap();
+        assert!(!AnalyticsService::new_with_transport(unreadable, "https://example.invalid", "", true).status().enabled);
+    }
+    #[test]
+    fn fresh_production_reports_sanitized_events_without_an_opt_in_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let observer = captured.clone();
+        let mut service = AnalyticsService::new_with_transport(dir.path().join("installation.json"), "https://example.invalid", "", true);
+        service.observer = Some(Arc::new(move |body| { observer.lock().unwrap().push(body.clone()) }));
+        let service = Arc::new(service);
+        service.opened();
+        assert_eq!(captured.lock().unwrap().len(), 3);
+        service.set_enabled(false).unwrap();
+        service.track("note_created", json!({}));
+        assert_eq!(captured.lock().unwrap().len(), 3);
+    }
+    #[test]
+    fn development_transport_is_disabled_even_with_an_explicit_saved_choice() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installation.json");
+        AnalyticsService::new_with_transport(path.clone(), "https://example.invalid", "", true)
+            .set_enabled(true)
+            .unwrap();
+        let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let observer = captured.clone();
+        let mut service =
+            AnalyticsService::new_with_transport(path, "https://example.invalid", "", false);
+        service.observer = Some(Arc::new(move |body| {
+            observer.lock().unwrap().push(body.clone())
+        }));
+        let service = Arc::new(service);
+        service.opened();
+        service.track("note_created", json!({}));
+        assert!(service.status().enabled);
+        assert!(captured.lock().unwrap().is_empty());
+    }
+    #[test]
+    fn first_party_envelope_has_only_allowlisted_metadata_and_random_event_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let mut service = AnalyticsService::new_with_transport(
+            dir.path().join("installation.json"),
+            "https://example.invalid",
+            "",
+            true,
+        );
+        let observer = captured.clone();
+        service.observer = Some(Arc::new(move |body| {
+            observer.lock().unwrap().push(body.clone())
+        }));
+        service.set_enabled(true).unwrap();
         let service = Arc::new(service);
         service.opened();
         service.track(

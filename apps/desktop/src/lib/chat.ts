@@ -1,5 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { beginLibraryActivity } from "./library-location";
 
 export type Citation = {
   citationId: string;
@@ -82,10 +83,13 @@ export async function askKnowledge(
   onToken?: (token: string) => void,
   requestId: string = crypto.randomUUID(),
 ): Promise<ChatAnswer> {
-  if (!isTauri()) {
-    throw new Error("完整问答需要在拾微桌面应用中使用");
-  }
-  const unlisten = onToken
+  const done = beginLibraryActivity("正在生成回答");
+  let unlisten: (() => void) | undefined;
+  try {
+    if (!isTauri()) {
+      throw new Error("完整问答需要在拾微桌面应用中使用");
+    }
+    unlisten = onToken
     ? await listen<{ token: string; requestId: string }>(
         "chat-token",
         (event) => {
@@ -94,14 +98,13 @@ export async function askKnowledge(
         },
       )
     : undefined;
-  try {
     return await invoke<ChatAnswer>("chat_ask", {
       query,
       conversationId,
       requestId,
     });
   } finally {
-    unlisten?.();
+    try { unlisten?.(); } finally { done(); }
   }
 }
 
@@ -129,6 +132,10 @@ export async function getConversation(
 
 export async function deleteConversation(conversationId: string): Promise<void> {
   await invoke("delete_conversation", { conversationId });
+}
+
+export async function cancelChat(requestId: string): Promise<void> {
+  await invoke("chat_cancel", { requestId });
 }
 
 export async function openOriginal(path: string): Promise<void> {

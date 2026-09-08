@@ -4,23 +4,23 @@ import { Button } from "./ui/button";
 import { checkForUpdate, downloadPercent, installUpdate, refreshReleaseStatus, setAnalyticsConsent, updateErrorCopy, useReleaseStore } from "../lib/updates";
 import { installErrorReporting } from "../lib/analytics";
 
-export function ReleaseSettings() {
-  const { status, update, privacyError } = useReleaseStore();
+export function ReleaseSettings({ section = "all" }: { section?: "all" | "privacy" | "about" }) {
+  const { status, update, privacyError, privacySaving, privacyLoaded } = useReleaseStore();
   useEffect(() => { void refreshReleaseStatus(); }, []);
-  return <div className="mt-6 space-y-5">
-    <section aria-label="隐私" className="rounded-2xl border border-line bg-panel p-6">
-      <h2 className="text-sm font-semibold">隐私</h2>
-      <label className="mt-4 flex items-center justify-between gap-5 text-sm"><span>帮助改进拾微</span><input type="checkbox" role="switch" aria-label="帮助改进拾微" checked={status.analytics.enabled} disabled={!isTauri()} onChange={(e) => void setAnalyticsConsent(e.target.checked)} className="size-5 accent-indigo" /></label>
-      <p className="mt-3 text-xs leading-6 text-muted">分享基础使用统计与固定类型的错误信息，帮助改进拾微。只发送随机安装标识、版本、使用事件及数量，不发送文件、笔记、文件名、路径、问题内容或 AI 回答。新安装默认开启，可随时关闭；更新会保留已有选择，错误报告跟随此开关。</p>
-      <p className="mt-2 text-xs leading-6 text-muted">统计发送到拾微服务，安装标识经加盐处理后仅用于汇总，不用于识别真实身份。事件最多保留 90 天；关闭后停止后续上报，不补传历史记录。</p>
+  return <div className="space-y-5">
+    {section !== "about" && <section aria-label="隐私" className="rounded-2xl border border-line bg-panel p-6">
+      <h2 className="text-base font-semibold">基础使用统计</h2>
+      <label className="mt-4 flex items-center justify-between gap-5 text-sm"><span>帮助改进拾微</span><input type="checkbox" role="switch" aria-label="帮助改进拾微" checked={privacyLoaded && status.analytics.enabled} disabled={!isTauri() || privacySaving || !privacyLoaded} onChange={(e) => void setAnalyticsConsent(e.target.checked)} className="size-5 accent-indigo" /></label>
+      <p className="mt-3 text-sm leading-6 text-muted">上传基础使用统计和错误信息，帮助改善体验。不收集资料、笔记、聊天内容或密钥，可随时关闭。</p>
+      <details className="mt-3 text-sm leading-6 text-muted"><summary className="cursor-pointer">统计详情</summary><p className="mt-2">默认开启，保留已有关闭选择。仅向拾微服务发送随机安装标识、版本、基础事件及数量、固定错误类型和受限模块位置；不发送文件名、路径、原始日志或完整错误堆栈。</p><p className="mt-2">随机安装标识是去标识化信息，不代表完全没有隐私影响。第一方服务加盐汇总，事件最多保留 90 天。关闭会取消未完成发送、清理待发事件，重新开启不补传；已接收的统计按保留期限清理，不会立即删除。关闭不影响本地功能或检查更新。</p></details>
       {!status.analytics.configured && <p className="mt-2 text-xs text-muted">此构建尚未配置统计服务，不会上传统计数据。</p>}
       {privacyError && <p role="alert" className="mt-3 text-sm text-red-700">{privacyError}</p>}
-    </section>
-    <section aria-label="关于" className="rounded-2xl border border-line bg-panel p-6">
-      <h2 className="text-sm font-semibold">关于拾微</h2><p className="mt-3 font-serif text-xl">拾微 <span className="ml-2 font-sans text-sm text-muted">版本 {status.version}</span></p>
-      <p className="mt-3 text-xs leading-6 text-muted">更新状态：{!status.updaterConfigured ? "更新服务待配置" : update.phase === "current" ? "已是最新版本" : update.phase === "checking" ? "正在检查…" : update.phase === "available" ? `发现新版本 ${update.version}` : update.phase === "error" ? "检查或更新失败，当前版本可继续使用" : "已启用签名验证 · 稳定版"}</p>
+    </section>}
+    {section !== "privacy" && <section aria-label="关于" className="rounded-2xl border border-line bg-panel p-6">
+      <h2 className="text-base font-semibold">关于拾微</h2><p className="mt-3 font-serif text-xl">拾微 <span className="ml-2 font-sans text-sm text-muted">版本 {status.version}</span></p>
+      <p className="mt-3 text-sm leading-6 text-muted">{!status.updaterConfigured ? "当前内测版暂不支持在线更新。" : `更新状态：${update.phase === "current" ? "已是最新版本" : update.phase === "checking" ? "正在检查…" : update.phase === "available" ? `发现新版本 ${update.version}` : update.phase === "error" ? "检查或更新失败，当前版本可继续使用" : "已启用签名验证 · 稳定版"}`}</p>
       <div className="mt-4 flex gap-3"><Button variant="secondary" disabled={!isTauri() || update.phase === "checking" || !status.updaterConfigured} onClick={() => void checkForUpdate(true)}>检查更新</Button>{update.phase === "available" && <Button onClick={() => useReleaseStore.getState().setVisible(true)}>查看更新</Button>}</div>
-    </section>
+    </section>}
   </div>;
 }
 

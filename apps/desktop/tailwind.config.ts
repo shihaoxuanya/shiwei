@@ -10,7 +10,7 @@ export default {
         paper: "#f5f2ea",
         panel: "#fbfaf6",
         indigo: "#5457a6",
-        muted: "#78766e",
+        muted: "#68665f",
         line: "#dfdbd0",
       },
       fontFamily: {

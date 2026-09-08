@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -12,12 +13,13 @@ import {
   ArrowUp,
   FileSearch,
   History,
-  MessageSquareText,
+  NotebookPen,
   MoreHorizontal,
   PanelLeftClose,
   Plus,
   Search,
   Sparkles,
+  Square,
   Trash2,
   X,
 } from "lucide-react";
@@ -38,11 +40,16 @@ const answerLabels: Record<AnswerKind, string> = {
   clarification: "需要你确认",
 };
 
-function shortDate(value: string) {
+export function historyDateGroup(value: string, now = new Date()) {
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
+  if (Number.isNaN(date.getTime())) return "更早";
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const yesterday = new Date(today);
+  yesterday.setDate(yesterday.getDate() - 1);
+  return date >= today ? "今天" : date >= yesterday ? "昨天" : "更早";
 }
+
+export type ReadyChatItem = { id: string; title: string; kind: "file" | "note" };
 
 function previewText(value: string) {
   return value
@@ -56,14 +63,22 @@ export function ChatPage({
   initialQuery = "",
   requestKey = "initial",
   active = true,
+  libraryRevision = 0,
   onOpenSettings,
   onOpenNote,
+  readyItems = [],
+  onAddMaterials,
+  onCreateNote,
 }: {
   initialQuery?: string;
   requestKey?: string;
   active?: boolean;
+  libraryRevision?: number;
   onOpenSettings: () => void;
   onOpenNote?: (noteId: string) => void;
+  readyItems?: ReadyChatItem[];
+  onAddMaterials?: () => void;
+  onCreateNote?: () => void;
 }) {
   const [store] = useState(createChatWorkspace);
   const state = useStore(store);
@@ -83,6 +98,9 @@ export function ChatPage({
   const stickToBottom = useRef(true);
   const displayedKey = useRef("");
   const homeRequests = useRef(new Set<string>());
+  const composing = useRef(false);
+  const historyTrigger = useRef<HTMLButtonElement | null>(null);
+  const dialog = useRef<HTMLDivElement>(null);
   const closeSource = useCallback(() => setCitation(null), []);
   const selectCitation = useCallback((value: Citation) => { setCitation(value); analytics.track("citation_clicked"); }, []);
   const busyHere = state.pending?.key === state.selected;
@@ -92,6 +110,36 @@ export function ChatPage({
     session.draft.length <= 2000 &&
     !state.pending &&
     session.loaded;
+
+  useEffect(() => {
+    if (!libraryRevision) return;
+    setCitation(null);
+    void store.getState().refreshAfterRelocation().catch(() => setToast("资料库位置已重新读取，部分历史对话暂未刷新，请稍后重试。"));
+  }, [libraryRevision, store]);
+
+  useEffect(() => {
+    if (!historyMenu) return;
+    document.querySelector<HTMLElement>(".chat-history-menu [role=menuitem]")?.focus();
+    const close = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setHistoryMenu(null);
+      historyTrigger.current?.focus();
+    };
+    const outside = (event: PointerEvent) => {
+      if (!(event.target instanceof Element) || event.target.closest(".chat-history-menu, .chat-history-menu-trigger")) return;
+      setHistoryMenu(null);
+    };
+    document.addEventListener("keydown", close);
+    document.addEventListener("pointerdown", outside);
+    return () => { document.removeEventListener("keydown", close); document.removeEventListener("pointerdown", outside); };
+  }, [historyMenu]);
+
+  useEffect(() => {
+    if (!deleteTarget) return;
+    dialog.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    return () => { historyTrigger.current?.focus(); };
+  }, [deleteTarget]);
 
   useEffect(() => {
     const timer = setTimeout(
@@ -206,6 +254,7 @@ export function ChatPage({
     (s) => !s.conversationId && (s.messages.length > 0 || !!s.draft.trim()),
   );
   const search = historySearch.trim().toLocaleLowerCase();
+  const starters = readyItems.filter((item, index, all) => item.title.trim() && all.findIndex((other) => other.id === item.id) === index).slice(0, 3);
 
   return (
     <section
@@ -276,17 +325,20 @@ export function ChatPage({
                         ? "正在回答…"
                         : s.status === "error"
                           ? "发送失败"
+                          : s.status === "stopped"
+                            ? "已停止"
                           : "草稿"}
                     </span>
                   </button>
                 ))}
-              {state.conversations.map((conversation) => {
+              {state.conversations.map((conversation, index) => {
                 const cached = Object.values(state.sessions).find(
                   (s) => s.conversationId === conversation.id,
                 );
                 return (
+                  <Fragment key={conversation.id}>
+                    {(index === 0 || historyDateGroup(state.conversations[index - 1].updatedAt) !== historyDateGroup(conversation.updatedAt)) && <h3 className="chat-history-group">{historyDateGroup(conversation.updatedAt)}</h3>}
                   <div
-                    key={conversation.id}
                     className={`chat-history-row ${session.conversationId === conversation.id ? "selected" : ""}`}
                   >
                     <button
@@ -309,21 +361,23 @@ export function ChatPage({
                           {previewText(conversation.preview)}
                         </span>
                       )}
-                      <span className="chat-history-meta">
+                      {(state.pending?.key === cached?.key && state.pending || cached?.unread || cached?.draft) && <span className="chat-history-meta">
                         {state.pending?.key === cached?.key && state.pending
                           ? "正在回答…"
                           : cached?.unread
                             ? "新回复"
                             : cached?.draft
                               ? "有草稿"
-                              : shortDate(conversation.updatedAt)}
-                      </span>
+                              : ""}
+                      </span>}
                     </button>
                     <button
                       className="chat-history-menu-trigger"
                       aria-label={`对话操作：${conversation.title}`}
                       aria-expanded={historyMenu === conversation.id}
+                      aria-haspopup="menu"
                       onClick={(event) => {
+                        historyTrigger.current = event.currentTarget;
                         event.stopPropagation();
                         setHistoryMenu((current) =>
                           current === conversation.id ? null : conversation.id,
@@ -348,6 +402,7 @@ export function ChatPage({
                       </div>
                     )}
                   </div>
+                  </Fragment>
                 );
               })}
               {!state.historyLoading &&
@@ -440,36 +495,41 @@ export function ChatPage({
                     <div className="chat-welcome-icon">
                       <Sparkles size={24} />
                     </div>
-                    <h2>想起什么，都可以问问拾微</h2>
+                    <h2>想找回什么？</h2>
                     <p>
-                      找回一份文件，接着上次的思路，或聊一个新问题。
-                      <br />
-                      涉及你的经历时，我会先找资料，再给答案。
+                      从你的资料和笔记中，找回过去的记录与思路。
                     </p>
-                    <div className="chat-starters">
-                      <button
-                        onClick={() => send("我的资料库里有什么资料？")}
-                        disabled={!!state.pending}
-                      >
-                        <FileSearch size={18} />
-                        <span>
-                          看看我的资料库<small>从已有资料开始</small>
-                        </span>
-                        <ArrowUp size={14} />
-                      </button>
-                      <button
+                    {starters.length > 0 ? <div className="chat-starters">
+                      {starters.map((item) => <button
+                        key={item.id}
                         onClick={() => {
-                          state.setDraft("我想了解 ");
+                          state.setDraft(`请总结 ${item.title}`);
                           input.current?.focus();
                         }}
                       >
-                        <MessageSquareText size={18} />
-                        <span>
-                          聊一个新问题<small>想法、知识、日常</small>
-                        </span>
-                        <ArrowUp size={14} />
-                      </button>
-                    </div>
+                        {item.kind === "note" ? <NotebookPen size={18} /> : <FileSearch size={18} />}
+                        <span>总结「{item.title}」<small>{item.kind === "note" ? "笔记" : "资料"} · 点击填入问题</small></span>
+                      </button>)}
+                    </div> : <div className="chat-start-guide">
+                      <p>先添加一份资料，或记下一段想法。处理完成后，就能从这里找回来。</p>
+                      <div className="flex flex-wrap gap-3">
+                      {onAddMaterials &&
+                      <button
+                        className="chat-guide-action"
+                        onClick={onAddMaterials}
+                      >
+                        <FileSearch size={18} />
+                        添加资料
+                      </button>}
+                      {onCreateNote &&
+                      <button
+                        className="chat-guide-action"
+                        onClick={onCreateNote}
+                      >
+                        <NotebookPen size={18} />记一下
+                      </button>}
+                      </div>
+                    </div>}
                   </div>
                 )}
               {session.status === "loading" && (
@@ -572,12 +632,12 @@ export function ChatPage({
                 >
                   <div className="chat-answer-label">
                     <span className="chat-status-dot" />
-                    {session.streaming ? "正在回答" : "正在查找资料、组织回答"}
+                    {session.status === "stopping" ? "正在停止回答" : session.streaming ? "正在回答" : "正在准备回答"}
                     <span className="ml-auto font-normal tabular-nums text-muted">
                       {elapsed} 秒
                     </span>
                   </div>
-                  {session.streaming ? (
+                  {session.status === "stopping" ? <p className="chat-wait-note" role="status">已发送停止请求，正在等待当前模型连接结束。未完成的回答不会保存。</p> : session.streaming ? (
                     <MessageContent text={session.streaming} />
                   ) : (
                     <p className="chat-wait-note">
@@ -588,6 +648,10 @@ export function ChatPage({
                   )}
                 </article>
               )}
+              {session.status === "stopped" && <div className="chat-stopped" role="status">
+                <p>已停止本次回答。你的问题仍在这里。</p>
+                {session.failed && <Button variant="secondary" disabled={!!state.pending} onClick={() => void state.send(undefined, session.failed)}>重新回答</Button>}
+              </div>}
               {session.error && (
                 <div className="chat-error" role="alert">
                   <p>{session.error}</p>
@@ -645,10 +709,13 @@ export function ChatPage({
                 value={session.draft}
                 rows={2}
                 onChange={(event) => state.setDraft(event.target.value)}
+                onCompositionStart={() => { composing.current = true; }}
+                onCompositionEnd={() => { composing.current = false; }}
                 onKeyDown={(event) => {
                   if (
                     event.key === "Enter" &&
                     !event.shiftKey &&
+                    !composing.current &&
                     !event.nativeEvent.isComposing &&
                     event.keyCode !== 229
                   ) {
@@ -667,7 +734,12 @@ export function ChatPage({
                     ? `${session.draft.length} / 2000 字`
                     : "Enter 发送 · Shift + Enter 换行"}
                 </span>
-                <Button
+                {busyHere ? <Button
+                  variant="secondary"
+                  className="chat-send"
+                  disabled={session.status === "stopping"}
+                  onClick={() => void state.stop()}
+                ><Square size={14} />{session.status === "stopping" ? "正在停止…" : "停止回答"}</Button> : <Button
                   className="chat-send"
                   aria-label="发送"
                   title={
@@ -682,16 +754,16 @@ export function ChatPage({
                 >
                   <ArrowUp size={17} />
                   发送
-                </Button>
+                </Button>}
               </div>
             </div>
             <p className="chat-privacy">
               {session.draft.length > 2000
                 ? "内容较长，请分成几条提问；已输入的文字不会丢失。"
-                : "个人记录以原始出处为准。只有回答所需的片段会发送给你配置的模型。"}
+                : "个人记录以原始出处为准。使用在线 AI 时，问题、必要的对话上下文和资料片段会发给所选服务。"}
             </p>
             <span className="sr-only" role="status">
-              {busyHere
+              {session.status === "stopped" ? "本次回答已停止" : busyHere
                 ? "拾微正在回答"
                 : session.error
                   ? "本次请求失败"
@@ -712,10 +784,20 @@ export function ChatPage({
       {deleteTarget && (
         <div className="chat-dialog-backdrop" role="presentation">
           <div
+            ref={dialog}
             className="chat-dialog"
             role="dialog"
             aria-modal="true"
             aria-labelledby="delete-conversation-title"
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && !deleting) { event.preventDefault(); setDeleteTarget(null); }
+              if (event.key === "Tab") {
+                const controls = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
+                const first = controls[0], last = controls.at(-1);
+                if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+                else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+              }
+            }}
           >
             <h2 id="delete-conversation-title">删除这段对话？</h2>
             <p>删除后无法恢复，但不会删除你导入的资料或笔记。</p>

@@ -28,19 +28,19 @@
 }
 .notes-sidebar-header p {
   color: #5d60a8;
-  font-size: 10px;
+  font-size: 13px;
   font-weight: 600;
   letter-spacing: 0.16em;
 }
 .notes-sidebar-header h1 {
   margin-top: 5px;
   font-family: Georgia, "Songti SC", SimSun, serif;
-  font-size: 26px;
+  font-size: 30px;
   font-weight: 600;
 }
 .notes-sidebar-header button {
   padding: 8px 11px;
-  font-size: 12px;
+  font-size: 14px;
 }
 .notes-search {
   display: flex;
@@ -56,14 +56,15 @@
   flex: 1;
   background: transparent;
   outline: none;
-  font-size: 12px;
+  font-size: 14px;
 }
 .notes-search input:focus-visible {
-  outline: none;
+  outline: 2px solid #6e70b5;
 }
 .notes-search button {
   border-radius: 5px;
-  padding: 2px;
+  min-width: 32px;
+  min-height: 32px;
 }
 .notes-list {
   min-height: 0;
@@ -74,8 +75,8 @@
 }
 .notes-group {
   margin: 14px 8px 5px;
-  color: #8b877c;
-  font-size: 10px;
+  color: #6b675f;
+  font-size: 13px;
   font-weight: 600;
   letter-spacing: 0.08em;
 }
@@ -101,7 +102,7 @@
   flex: 1;
   overflow: hidden;
   color: #444139;
-  font-size: 13px;
+  font-size: 15px;
   line-height: 1.55;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -112,13 +113,13 @@
 }
 .notes-list-item small {
   flex-shrink: 0;
-  color: #979287;
-  font-size: 9px;
+  color: #706b62;
+  font-size: 13px;
 }
 .notes-empty-list {
   padding: 24px 8px;
   color: #8a8579;
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.8;
 }
 .notes-editor {
@@ -142,13 +143,15 @@
   gap: 12px;
 }
 .notes-save-state {
-  color: #8d887c;
-  font-size: 11px;
+  color: #6c675e;
+  font-size: 13px;
+  line-height: 1.5;
 }
 .notes-delete {
   display: flex;
-  width: 30px;
-  height: 30px;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
   align-items: center;
   justify-content: center;
   border-radius: 8px;
@@ -171,7 +174,8 @@
 }
 .notes-workspace .notes-title:focus-visible,
 .notes-workspace .notes-body:focus-visible {
-  outline: none;
+  outline: 2px solid #6e70b5;
+  outline-offset: 5px;
 }
 .notes-title::placeholder,
 .notes-body::placeholder {
@@ -186,14 +190,18 @@
   color: #454139;
   margin-top: 22px;
   outline: none;
-  font-size: 15px;
-  line-height: 2;
+  font-family: inherit;
+  font-size: 16px;
+  line-height: 1.8;
 }
 .notes-save-error {
   margin-top: 12px;
   color: #a44940;
-  font-size: 12px;
+  font-size: 14px;
 }
+.notes-save-error button, .notes-index-retry { margin-top: 10px; }
+.notes-index-retry button { min-height: 36px; }
+.notes-workspace button:disabled { opacity: 0.6; cursor: default; }
 .notes-page-error {
   position: absolute;
   z-index: 5;

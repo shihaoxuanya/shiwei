@@ -13,6 +13,19 @@ from shiwei_ai.retrieval.query_plan import plan_query
 from shiwei_ai.search_terms import search_terms
 
 
+def is_live_weather_request(query: str) -> bool:
+    """A current forecast needs a live source, not coincidentally matching notes.
+
+    Keep explicit source/history questions in the existing evidence pipeline.
+    This is a capability boundary, not a weather tool or a model classifier.
+    """
+    if re.search(r"笔记|记录|资料|文件|当时|那天|上次|以前|之前|曾经|过去|去年|回忆|什么是|原理|定义", query):
+        return False
+    weather = re.search(r"天气|气温|温度|多少度|几度|下雨|下雪|降雨|降温", query)
+    live = re.search(r"今天|今日|现在|当前|此刻|实时|明天|明日|后天|今晚|今早|这周|本周|周末|未来|预报", query)
+    return bool(weather and live)
+
+
 def source_card(row):
     keys = set(row.keys())
     source_type = row["source_type"] if "source_type" in keys else "imported_file"
@@ -116,6 +129,8 @@ class Assistant:
 
         if compact in {"你好", "您好", "嗨", "hello", "hi", "谢谢", "谢谢你", "早上好", "晚上好"}:
             return local("你好，我是拾微。可以帮你找回资料、总结记录，也可以聊聊日常问题。", "general")
+        if is_live_weather_request(query):
+            return local("我目前没有实时天气查询能力，无法确认当前或预报的气温和天气。", "general")
         query_plan = plan_query(query)
         matches = self.match_sources(query)
         overview = bool(re.search(r"(资料库|知识库).*(有什么|有哪些|概览|内容)|^(我有|我导入了|列出|查看全部).*(资料|文件)|^(有哪些资料|有什么资料|资料概览)$", compact))

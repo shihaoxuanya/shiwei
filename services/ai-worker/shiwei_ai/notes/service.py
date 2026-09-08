@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -29,11 +30,14 @@ class NoteService:
         pattern = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         rows = self.database.connection.execute(
             """
-            SELECT id, source_id, title, content, created_at, updated_at
-            FROM notes
+            SELECT n.id, n.source_id, n.title, n.content, n.created_at, n.updated_at,
+                   EXISTS(SELECT 1 FROM documents d JOIN chunks c ON c.document_id=d.id
+                          JOIN chunks_fts f ON f.chunk_id=c.id
+                          WHERE d.source_id=n.source_id AND d.created_at=n.updated_at) AS keyword_ready
+            FROM notes n
             WHERE deleted_at IS NULL
               AND (? = '' OR title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\')
-            ORDER BY updated_at DESC, rowid DESC
+            ORDER BY updated_at DESC, n.rowid DESC
             LIMIT 2000
             """,
             (query, pattern, pattern),
@@ -43,8 +47,11 @@ class NoteService:
     def get(self, note_id: str) -> dict[str, Any]:
         row = self.database.connection.execute(
             """
-            SELECT id, source_id, title, content, created_at, updated_at
-            FROM notes WHERE id = ? AND deleted_at IS NULL
+            SELECT n.id, n.source_id, n.title, n.content, n.created_at, n.updated_at,
+                   EXISTS(SELECT 1 FROM documents d JOIN chunks c ON c.document_id=d.id
+                          JOIN chunks_fts f ON f.chunk_id=c.id
+                          WHERE d.source_id=n.source_id AND d.created_at=n.updated_at) AS keyword_ready
+            FROM notes n WHERE n.id = ? AND deleted_at IS NULL
             """,
             (note_id,),
         ).fetchone()
@@ -90,7 +97,7 @@ class NoteService:
         if len(content) > 200_000:
             raise ValueError("单条笔记正文不能超过 20 万字")
         row = self.database.connection.execute(
-            "SELECT id, source_id, created_at FROM notes WHERE id = ? AND deleted_at IS NULL",
+            "SELECT id, source_id, created_at, updated_at FROM notes WHERE id = ? AND deleted_at IS NULL",
             (note_id,),
         ).fetchone()
         if row is None:
@@ -102,6 +109,10 @@ class NoteService:
         ).fetchone()
         display_title = self.display_title(title, content)
         now = utc_now()
+        # Windows clocks can return the same instant for consecutive saves.
+        # Keep this existing version token strictly monotonic per note.
+        if now <= row["updated_at"]:
+            now = (datetime.fromisoformat(row["updated_at"]) + timedelta(microseconds=1)).isoformat()
         document_id, chunk_count = self._replace_projection(
             note_id=note_id,
             source_id=source_id,
@@ -133,6 +144,7 @@ class NoteService:
         if row is None:
             raise ValueError("没有找到这条笔记")
         with self.database.transaction() as connection:
+            connection.execute("DELETE FROM settings WHERE key = ?", (f"note_retrieval:{note_id}",))
             if row["document_id"]:
                 connection.execute("DELETE FROM chunks_fts WHERE document_id = ?", (row["document_id"],))
                 connection.execute("DELETE FROM chunks_fts_trigram WHERE document_id = ?", (row["document_id"],))
@@ -316,4 +328,8 @@ class NoteService:
             "createdAt": row["created_at"],
             "updatedAt": row["updated_at"],
             "displayTitle": NoteService.display_title(row["title"], row["content"]),
+            "retrieval": {
+                "revision": row["updated_at"],
+                "keyword": "ready" if row["keyword_ready"] else "empty" if not row["title"].strip() and not row["content"].strip() else "pending",
+            },
         }

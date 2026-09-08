@@ -25,6 +25,7 @@ vi.mock("./lib/chat", () => ({
   listConversations: vi.fn(),
   openOriginal: vi.fn(),
   revealOriginal: vi.fn(),
+  cancelChat: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({
   isTauri: () => true,
@@ -162,6 +163,25 @@ it("keeps background errors in their original conversation", async () => {
     store.getState().sessions[store.getState().selected].error,
   ).toBeUndefined();
   expect(store.getState().pending).toBeUndefined();
+});
+
+it("does not force scroll to the bottom while reading an active answer's history", async () => {
+  const pending = deferred<typeof answer>();
+  ask.mockReturnValue(pending.promise);
+  render(<ChatPage onOpenSettings={() => {}} />);
+  send("较长的问题");
+  const area = screen.getByLabelText("对话消息");
+  Object.defineProperty(area, "scrollHeight", { configurable: true, value: 1600 });
+  Object.defineProperty(area, "clientHeight", { configurable: true, value: 350 });
+  area.scrollTop = 200;
+  fireEvent.scroll(area);
+  await act(async () => { ask.mock.calls[0][2]?.("到达的新内容"); });
+  expect(area.scrollTop).toBe(200);
+  expect(screen.getByRole("button", { name: "回到最新消息" })).toBeVisible();
+  await act(async () => pending.resolve(answer));
+  expect(area.scrollTop).toBe(200);
+  fireEvent.click(screen.getByRole("button", { name: "回到最新消息" }));
+  expect(area.scrollTop).toBe(1600);
 });
 
 it("summarizes a file with one click without overwriting another draft", async () => {

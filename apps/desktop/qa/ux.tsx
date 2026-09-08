@@ -7,11 +7,15 @@ import "../src/styles.css";
 
 Object.defineProperty(window, "isTauri", { value: true, configurable: true });
 mockWindows("main");
+const qaPort = new URLSearchParams(window.location.search).get("qaPort") === "1423" ? "1423" : "1422";
 mockIPC(
   async (command, args) => {
     if (command.startsWith("plugin:webview|")) return;
+    if (command === "analytics_track") return; // QA never reports production statistics.
+    if (command === "update_check") return { status: "unconfigured" };
     const map: Record<string, string> = {
       worker_ping: "ping",
+      worker_info: "worker_info",
       chat_ask: "chat",
       list_conversations: "list_conversations",
       get_conversation: "get_conversation",
@@ -20,17 +24,29 @@ mockIPC(
       get_note: "get_note",
       create_note: "create_note",
       update_note: "update_note",
+      index_note: "index_note",
       delete_note: "delete_note",
       list_sources: "list_sources",
+      import_paths: "import_paths",
+      delete_source: "delete_source",
+      reindex_source: "reindex_source",
+      search_lexical: "search_lexical",
+      search_hybrid: "search_hybrid",
       provider_status: "provider_status",
       index_status: "index_status",
+      chat_cancel: "cancel_chat",
+      release_status: "qa_release_status",
+      analytics_consent: "qa_analytics_consent",
+      "plugin:dialog|open": "qa_fixture_paths",
     };
     if (!map[command])
       throw new Error("隔离预览不执行文件打开或配置修改，请在桌面应用中操作。");
-    const response = await fetch("http://127.0.0.1:1422/rpc", {
+    const params = { ...args };
+    if (command === "chat_ask" || command === "chat_cancel") params.clientRequestId = args?.requestId;
+    const response = await fetch(`http://127.0.0.1:${qaPort}/rpc`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ method: map[command], params: args }),
+      body: JSON.stringify({ method: map[command], params }),
     });
     if (!response.ok || !response.body)
       throw new Error("隔离验收 Worker 无法连接");
@@ -50,9 +66,16 @@ mockIPC(
             ...packet.data,
             requestId: args?.requestId,
           });
+        else if (packet.event === "job_progress") await emit("import-progress", packet.data);
         else if (packet.error) throw new Error(packet.error.message);
-        else if (packet.result)
+        else if (packet.result) {
+          if (command === "plugin:dialog|open") {
+            const options = args?.options as { directory?: boolean } | undefined;
+            return options?.directory ? packet.result.inputDir : packet.result.importFiles;
+          }
+          if (command === "search_lexical") return packet.result.hits;
           return command === "list_sources" ? packet.result.sources : packet.result;
+        }
       }
     }
     throw new Error("隔离验收请求中断");

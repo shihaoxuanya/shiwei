@@ -2,12 +2,13 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::env;
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -60,23 +61,60 @@ struct RpcResponse {
 
 struct WorkerProcess {
     child: Child,
-    stdin: ChildStdin,
+    stdin: Arc<Mutex<ChildStdin>>,
     responses: Receiver<String>,
 }
 
 pub struct WorkerClient {
     process: Mutex<Option<WorkerProcess>>,
+    control_stdin: Mutex<Option<Arc<Mutex<ChildStdin>>>>,
+    cancelled_chats: Mutex<VecDeque<String>>,
     timeout: Duration,
     updating: AtomicBool,
+    relocating: AtomicBool,
+    location_config: Mutex<Option<PathBuf>>,
+}
+
+struct RelocationGuard<'a>(&'a AtomicBool);
+impl Drop for RelocationGuard<'_> {
+    fn drop(&mut self) { self.0.store(false, Ordering::SeqCst); }
+}
+
+fn library_busy() -> WorkerError {
+    WorkerError::Remote { code: "LIBRARY_BUSY".into(), message: "资料库正在使用，请等待导入、保存或回答完成后再更改位置。".into() }
 }
 
 impl WorkerClient {
     pub fn new() -> Self {
         Self {
             process: Mutex::new(None),
+            control_stdin: Mutex::new(None),
+            cancelled_chats: Mutex::new(VecDeque::new()),
             timeout: DEFAULT_TIMEOUT,
             updating: AtomicBool::new(false),
+            relocating: AtomicBool::new(false),
+            location_config: Mutex::new(None),
         }
+    }
+
+    /// Inject an external pointer file into each child, including crash recovery.
+    /// Never mutate the parent process environment or store this inside the library.
+    pub fn set_location_config(&self, path: PathBuf) -> Result<(), WorkerError> {
+        if !path.is_absolute() { return Err(WorkerError::Protocol("资料库配置路径必须是绝对路径".into())); }
+        let process = self.process.lock().map_err(|_| WorkerError::Exited)?;
+        if process.is_some() { return Err(library_busy()); }
+        *self.location_config.lock().map_err(|_| WorkerError::Exited)? = Some(path);
+        Ok(())
+    }
+
+    pub fn is_relocating(&self) -> bool { self.relocating.load(Ordering::SeqCst) }
+
+    pub fn relocate_library<T, F>(&self, params: Value, mut on_event: F) -> Result<T, WorkerError>
+    where T: DeserializeOwned, F: FnMut(&Value) {
+        self.relocating.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .map_err(|_| library_busy())?;
+        let _guard = RelocationGuard(&self.relocating);
+        self.request_internal("relocate_library", params, Some(&mut on_event))
     }
 
     pub fn start(&self) -> Result<(), WorkerError> {
@@ -89,7 +127,9 @@ impl WorkerClient {
                 return Ok(());
             }
         }
-        *process = Some(spawn_worker()?);
+        let running = spawn_worker(self.location_config.lock().map_err(|_| WorkerError::Exited)?.as_deref())?;
+        *self.control_stdin.lock().map_err(|_| WorkerError::Exited)? = Some(running.stdin.clone());
+        *process = Some(running);
         Ok(())
     }
 
@@ -97,14 +137,39 @@ impl WorkerClient {
         self.request("ping", json!({}))
     }
 
+    pub fn cancel_chat(&self, client_request_id: &str) -> Result<(), WorkerError> {
+        // Only a cancellation flag travels beside the serialized RPC. No database
+        // work runs here, and stopping a reply never kills a note save/import.
+        let mut cancelled = self.cancelled_chats.lock().map_err(|_| WorkerError::Exited)?;
+        if !cancelled.iter().any(|id| id == client_request_id) {
+            cancelled.push_back(client_request_id.to_owned());
+            if cancelled.len() > 128 { cancelled.pop_front(); }
+        }
+        let stdin = self.control_stdin.lock().map_err(|_| WorkerError::Exited)?.clone();
+        let Some(stdin) = stdin else { return Ok(()); };
+        let mut writer = stdin.lock().map_err(|_| WorkerError::Exited)?;
+        let request = RpcRequest {
+            jsonrpc: "2.0", protocol_version: PROTOCOL_VERSION,
+            id: Uuid::new_v4().to_string(), method: "cancel_chat",
+            params: json!({"clientRequestId": client_request_id}),
+        };
+        serde_json::to_writer(&mut *writer, &request)?;
+        writer.write_all(b"\n")?;
+        writer.flush()?;
+        Ok(())
+    }
+
     pub fn prepare_update(&self) -> Result<(), WorkerError> {
         // Never terminate an active import, save, migration or conversation.
+        if self.is_relocating() { return Err(library_busy()); }
         let mut process = self.process.try_lock().map_err(|_| WorkerError::Timeout)?;
+        if self.is_relocating() { return Err(library_busy()); }
         self.updating.store(true, Ordering::SeqCst);
         if let Some(mut running) = process.take() {
             let _ = running.child.kill();
             let _ = running.child.wait();
         }
+        *self.control_stdin.lock().map_err(|_| WorkerError::Exited)? = None;
         Ok(())
     }
     pub fn resume_after_update(&self) {
@@ -116,6 +181,7 @@ impl WorkerClient {
         method: &str,
         params: Value,
     ) -> Result<T, WorkerError> {
+        if method == "relocate_library" { return Err(library_busy()); }
         self.request_internal(method, params, None)
     }
 
@@ -129,6 +195,7 @@ impl WorkerClient {
         T: DeserializeOwned,
         F: FnMut(&Value),
     {
+        if method == "relocate_library" { return Err(library_busy()); }
         self.request_internal(method, params, Some(&mut on_event))
     }
 
@@ -138,10 +205,32 @@ impl WorkerClient {
         params: Value,
         mut on_event: Option<&mut dyn FnMut(&Value)>,
     ) -> Result<T, WorkerError> {
-        self.start()?;
-        let mut process_guard = self.process.lock().map_err(|_| WorkerError::Exited)?;
+        let relocating = method == "relocate_library";
+        if self.is_relocating() && !relocating { return Err(library_busy()); }
+        let cancellable_chat = if method == "chat" {
+            params.get("clientRequestId").and_then(Value::as_str).map(str::to_owned)
+        } else { None };
+        let cancelled_error = || WorkerError::Remote { code: "CHAT_CANCELLED".into(), message: "已停止本次回答，问题仍保留，可重新发送。".into() };
+        if let Some(id) = &cancellable_chat {
+            let mut cancelled = self.cancelled_chats.lock().map_err(|_| WorkerError::Exited)?;
+            if cancelled.contains(id) {
+                cancelled.retain(|item| item != id);
+                return Err(cancelled_error());
+            }
+        }
+        if !relocating { self.start()?; }
+        let mut process_guard = if relocating {
+            // Do not queue a location switch behind active work with a stale UI.
+            self.process.try_lock().map_err(|_| library_busy())?
+        } else { self.process.lock().map_err(|_| WorkerError::Exited)? };
+        if self.is_relocating() && !relocating { return Err(library_busy()); }
         if self.updating.load(Ordering::SeqCst) {
             return Err(WorkerError::Exited);
+        }
+        if relocating && (process_guard.is_none() || process_guard.as_mut().is_some_and(|p| p.child.try_wait().ok().flatten().is_some())) {
+            let running = spawn_worker(self.location_config.lock().map_err(|_| WorkerError::Exited)?.as_deref())?;
+            *self.control_stdin.lock().map_err(|_| WorkerError::Exited)? = Some(running.stdin.clone());
+            *process_guard = Some(running);
         }
         let process = process_guard.as_mut().ok_or(WorkerError::Exited)?;
 
@@ -158,9 +247,22 @@ impl WorkerClient {
             method,
             params,
         };
-        serde_json::to_writer(&mut process.stdin, &request)?;
-        process.stdin.write_all(b"\n")?;
-        process.stdin.flush()?;
+        {
+            // A stop may arrive while this chat waits behind an import/save.
+            // Serialize the cancellation check and pipe write with the control
+            // lane, so a cancel can never overtake registration in Python.
+            let mut cancelled = self.cancelled_chats.lock().map_err(|_| WorkerError::Exited)?;
+            if let Some(id) = &cancellable_chat {
+                if cancelled.contains(id) {
+                    cancelled.retain(|item| item != id);
+                    return Err(cancelled_error());
+                }
+            }
+            let mut writer = process.stdin.lock().map_err(|_| WorkerError::Exited)?;
+            serde_json::to_writer(&mut *writer, &request)?;
+            writer.write_all(b"\n")?;
+            writer.flush()?;
+        }
 
         // OCR and batch indexing are long-running local work, not chat requests.
         let timeout = if matches!(
@@ -174,18 +276,34 @@ impl WorkerClient {
         let deadline = Instant::now() + timeout;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
+            if !relocating && remaining.is_zero() {
+                if let Some(id) = &cancellable_chat { let _ = self.cancel_chat(id); }
                 return Err(WorkerError::Timeout);
             }
-            let raw_response =
+            // A timeout must not tell the UI migration failed while Python is
+            // still verifying or about to atomically commit the new location.
+            // Hold the exclusive lane until the final response or process exit.
+            let raw_response = if relocating {
+                process.responses.recv().map_err(|_| WorkerError::Exited)?
+            } else {
                 process
                     .responses
                     .recv_timeout(remaining)
                     .map_err(|error| match error {
-                        mpsc::RecvTimeoutError::Timeout => WorkerError::Timeout,
+                        mpsc::RecvTimeoutError::Timeout => {
+                            if let Some(id) = &cancellable_chat { let _ = self.cancel_chat(id); }
+                            WorkerError::Timeout
+                        },
                         mpsc::RecvTimeoutError::Disconnected => WorkerError::Exited,
-                    })?;
-            let envelope: Value = serde_json::from_str(&raw_response)?;
+                    })?
+            };
+            let envelope: Value = match serde_json::from_str(&raw_response) {
+                Ok(value) => value,
+                // A stray stdout diagnostic is not a terminal migration result.
+                // Never log the content or release the library lock early.
+                Err(_) if relocating => continue,
+                Err(error) => return Err(WorkerError::Json(error)),
+            };
             if envelope.get("event").is_some() {
                 if event_belongs_to(&envelope, &request_id) {
                     if let Some(handler) = on_event.as_deref_mut() {
@@ -198,6 +316,9 @@ impl WorkerClient {
             // the next request on this single, serialized worker connection.
             if envelope.get("id").and_then(Value::as_str) != Some(&request_id) {
                 continue;
+            }
+            if let Some(id) = &cancellable_chat {
+                self.cancelled_chats.lock().map_err(|_| WorkerError::Exited)?.retain(|item| item != id);
             }
             return parse_response(&raw_response, &request_id);
         }
@@ -219,7 +340,7 @@ impl Drop for WorkerClient {
     }
 }
 
-fn spawn_worker() -> Result<WorkerProcess, WorkerError> {
+fn spawn_worker(location_config: Option<&Path>) -> Result<WorkerProcess, WorkerError> {
     let worker_project = worker_project_dir_from(Path::new(env!("CARGO_MANIFEST_DIR")));
     let executable = env::current_exe()?;
     let mut command = worker_command(
@@ -228,6 +349,7 @@ fn spawn_worker() -> Result<WorkerProcess, WorkerError> {
         cfg!(debug_assertions),
         cfg!(windows),
     )?;
+    apply_location_config(&mut command, location_config);
     configure_worker_process(&mut command);
     let mut child = command.spawn()?;
 
@@ -256,9 +378,13 @@ fn spawn_worker() -> Result<WorkerProcess, WorkerError> {
 
     Ok(WorkerProcess {
         child,
-        stdin,
+        stdin: Arc::new(Mutex::new(stdin)),
         responses,
     })
+}
+
+fn apply_location_config(command: &mut Command, location_config: Option<&Path>) {
+    if let Some(path) = location_config { command.env("SHIWEI_LOCATION_CONFIG", path); }
 }
 
 fn development_python_path(project: &Path, windows: bool) -> PathBuf {
@@ -416,6 +542,74 @@ mod tests {
     }
 
     #[test]
+    fn injects_location_config_only_into_worker_environment() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("library-location.json");
+        let mut command = Command::new("unused-test-worker");
+        let previous = env::var_os("SHIWEI_LOCATION_CONFIG");
+        apply_location_config(&mut command, Some(&path));
+        assert_eq!(command.get_envs().find(|(key, _)| *key == "SHIWEI_LOCATION_CONFIG").unwrap().1, Some(path.as_os_str()));
+        assert_eq!(env::var_os("SHIWEI_LOCATION_CONFIG"), previous);
+        let client = WorkerClient::new();
+        assert!(client.set_location_config(PathBuf::from("relative/location.json")).is_err());
+        client.set_location_config(path.clone()).unwrap();
+        assert_eq!(*client.location_config.lock().unwrap(), Some(path));
+    }
+
+    #[test]
+    fn relocation_refuses_busy_worker_and_always_releases_ui_guard() {
+        let client = WorkerClient::new();
+        let _active = client.process.lock().unwrap();
+        let result = client.relocate_library::<Value, _>(json!({}), |_| {});
+        assert!(matches!(result, Err(WorkerError::Remote {code, ..}) if code == "LIBRARY_BUSY"));
+        assert!(!client.is_relocating());
+    }
+
+    #[test]
+    fn relocation_blocks_updates_and_ordinary_requests_without_waiting() {
+        let client = WorkerClient::new();
+        client.relocating.store(true, Ordering::SeqCst);
+        assert!(client.prepare_update().is_err());
+        assert!(client.request::<Value>("update_note", json!({})).is_err());
+        assert!(client.request_with_events::<Value, _>("import_paths", json!({}), |_|{}).is_err());
+        assert!(client.relocate_library::<Value, _>(json!({}), |_|{}).is_err());
+        assert!(client.is_relocating());
+        drop(RelocationGuard(&client.relocating));
+        assert!(!client.is_relocating());
+        assert!(!client.updating.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn migration_waits_for_final_response_past_the_normal_rpc_timeout() {
+        let python = development_python_path(&worker_project_dir_from(Path::new(env!("CARGO_MANIFEST_DIR"))), cfg!(windows));
+        let mut command = Command::new(python);
+        command.args(["-c", "import json,sys,time; r=json.loads(sys.stdin.readline()); print('stray diagnostic',flush=True); time.sleep(0.1); print(json.dumps({'jsonrpc':'2.0','protocol_version':'1.0','id':r['id'],'result':{'verified':True}}),flush=True)"]);
+        configure_worker_process(&mut command);
+        let mut child = command.spawn().unwrap();
+        let stdin = Arc::new(Mutex::new(child.stdin.take().unwrap()));
+        let stdout = child.stdout.take().unwrap();
+        let (sender, responses) = mpsc::channel();
+        thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) { let _ = sender.send(line); }
+        });
+        let mut client = WorkerClient::new();
+        client.timeout = Duration::from_millis(1);
+        *client.process.lock().unwrap() = Some(WorkerProcess { child, stdin, responses });
+        let result: Value = client.relocate_library(json!({}), |_| {}).unwrap();
+        assert_eq!(result["verified"], true);
+        assert!(!client.is_relocating());
+    }
+
+    #[test]
+    fn migration_cannot_bypass_its_guard_through_generic_rpc_methods() {
+        let client = WorkerClient::new();
+        assert!(client.request::<Value>("relocate_library", json!({})).is_err());
+        assert!(client.request_with_events::<Value, _>("relocate_library", json!({}), |_|{}).is_err());
+        assert!(!client.is_relocating());
+        assert!(client.process.lock().unwrap().is_none());
+    }
+
+    #[test]
     fn resolves_mac_and_windows_worker_layouts() {
         let project = Path::new("repo/services/ai-worker");
         assert!(development_python_path(project, true).ends_with(".venv/Scripts/python.exe"));
@@ -538,6 +732,27 @@ mod tests {
         let client = WorkerClient::new();
         let result: Ping = client.ping().expect("Python Worker should answer ping");
         assert_eq!(result.status, "pong");
+    }
+
+    #[test]
+    fn cancel_control_does_not_wait_for_serialized_rpc_lock_or_kill_worker() {
+        let client = WorkerClient::new();
+        let _: Ping = client.ping().unwrap();
+        let active = client.process.lock().unwrap();
+        client.cancel_chat("finished-request").unwrap();
+        drop(active);
+        let result: Ping = client.ping().unwrap();
+        assert_eq!(result.status, "pong");
+    }
+
+    #[test]
+    fn cancellation_before_chat_starts_is_not_lost() {
+        let client = WorkerClient::new();
+        client.cancel_chat("queued").unwrap();
+        let result = client.request::<Value>("chat", json!({"clientRequestId":"queued", "query":"你好"}));
+        assert!(matches!(result, Err(WorkerError::Remote { code, .. }) if code == "CHAT_CANCELLED"));
+        assert!(client.process.lock().unwrap().is_none());
+        assert!(client.cancelled_chats.lock().unwrap().is_empty());
     }
 
     #[cfg(windows)]

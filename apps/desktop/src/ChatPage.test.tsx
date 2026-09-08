@@ -13,6 +13,7 @@ import {
   listConversations,
   openOriginal,
   deleteConversation,
+  cancelChat,
 } from "./lib/chat";
 
 vi.mock("./lib/chat", () => ({
@@ -22,6 +23,7 @@ vi.mock("./lib/chat", () => ({
   openOriginal: vi.fn(),
   revealOriginal: vi.fn(),
   deleteConversation: vi.fn(),
+  cancelChat: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({
   isTauri: () => true,
@@ -234,5 +236,84 @@ it("returns to a blank conversation when deleting the open conversation", async 
   fireEvent.click(screen.getByRole("button", { name: "对话操作：已有对话" }));
   fireEvent.click(screen.getByRole("menuitem", { name: "删除对话" }));
   fireEvent.click(screen.getByRole("button", { name: "删除" }));
-  expect(await screen.findByText("想起什么，都可以问问拾微")).toBeVisible();
+  expect(await screen.findByText("想找回什么？")).toBeVisible();
+});
+
+it("fills real ready-title starter examples without automatically sending", () => {
+  render(<ChatPage onOpenSettings={() => {}} readyItems={[
+    { id: "note", title: "2025年9月3日会议", kind: "note" },
+    { id: "file", title: "合成部署说明.pdf", kind: "file" },
+  ]} />);
+  fireEvent.click(screen.getByRole("button", { name: /总结「2025年9月3日会议」/ }));
+  expect(screen.getByRole("textbox", { name: "消息" })).toHaveValue("请总结 2025年9月3日会议");
+  expect(ask).not.toHaveBeenCalled();
+  expect(screen.queryByText(/你参加的会议/)).not.toBeInTheDocument();
+});
+
+it("offers real import and note entry callbacks when no ready content exists", () => {
+  const add = vi.fn(), note = vi.fn();
+  render(<ChatPage onOpenSettings={() => {}} onAddMaterials={add} onCreateNote={note} />);
+  fireEvent.click(screen.getByRole("button", { name: "添加资料" }));
+  fireEvent.click(screen.getByRole("button", { name: "记一下" }));
+  expect(add).toHaveBeenCalledOnce(); expect(note).toHaveBeenCalledOnce();
+  expect(ask).not.toHaveBeenCalled();
+});
+
+it("tracks the entire IME composition session, not just native key flags", async () => {
+  render(<ChatPage onOpenSettings={() => {}} />);
+  const input = screen.getByRole("textbox", { name: "消息" });
+  fireEvent.compositionStart(input);
+  fireEvent.change(input, { target: { value: "迁移" } });
+  fireEvent.keyDown(input, { key: "Enter" });
+  expect(ask).not.toHaveBeenCalled();
+  fireEvent.compositionEnd(input);
+  ask.mockResolvedValue(answer);
+  fireEvent.keyDown(input, { key: "Enter" });
+  expect(ask).toHaveBeenCalledOnce();
+  await screen.findByText("回答完成");
+});
+
+it("stops a real request by its id, preserves the question and retries once", async () => {
+  const pending = deferred<typeof answer>();
+  ask.mockReturnValueOnce(pending.promise).mockResolvedValueOnce(answer);
+  vi.mocked(cancelChat).mockResolvedValue();
+  render(<ChatPage onOpenSettings={() => {}} />);
+  send("需要停止的问题");
+  fireEvent.click(screen.getByRole("button", { name: "停止回答" }));
+  expect(cancelChat).toHaveBeenCalledWith(ask.mock.calls[0][3]);
+  expect(screen.getByRole("button", { name: "正在停止…" })).toBeDisabled();
+  await act(async () => {
+    ask.mock.calls[0][2]?.("停止后到达的旧片段");
+    pending.reject(new Error("已停止本次回答，问题仍保留，可重新发送。"));
+  });
+  expect(screen.queryByText("停止后到达的旧片段")).not.toBeInTheDocument();
+  expect(screen.getByText("已停止本次回答。你的问题仍在这里。")).toBeVisible();
+  expect(screen.getByText("本次回答已停止")).toBeInTheDocument();
+  expect(screen.queryByText("回答已完成")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "重新回答" }));
+  await screen.findByText("回答完成");
+  expect(screen.getAllByText("需要停止的问题", { selector: '[data-message-role="user"]' })).toHaveLength(1);
+  expect(ask).toHaveBeenCalledTimes(2);
+});
+
+it("keeps history menu keyboard reachable and restores focus on Escape", async () => {
+  render(<ChatPage onOpenSettings={() => {}} />);
+  const trigger = await screen.findByRole("button", { name: "对话操作：已有对话" });
+  fireEvent.click(trigger);
+  expect(screen.getByRole("menuitem", { name: "删除对话" })).toHaveFocus();
+  fireEvent.keyDown(document, { key: "Escape" });
+  expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  expect(trigger).toHaveFocus();
+});
+
+it("groups stored conversations by today, yesterday and earlier", async () => {
+  const now = new Date();
+  const yesterday = new Date(now); yesterday.setDate(yesterday.getDate() - 1);
+  vi.mocked(listConversations).mockResolvedValue([
+    { ...summary, id: "today", updatedAt: now.toISOString() },
+    { ...summary, id: "yesterday", updatedAt: yesterday.toISOString() },
+    { ...summary, id: "earlier", updatedAt: "2000-01-01" },
+  ]);
+  render(<ChatPage onOpenSettings={() => {}} />);
+  for (const label of ["今天", "昨天", "更早"]) expect(await screen.findByRole("heading", { name: label })).toBeVisible();
 });

@@ -8,6 +8,11 @@ export type Note = {
   displayTitle: string;
   createdAt: string;
   updatedAt: string;
+  retrieval?: {
+    revision: string;
+    keyword: "ready" | "pending" | "empty";
+    semantic?: "disabled" | "pending" | "ready" | "failed" | "requires_rebuild" | "empty";
+  };
 };
 
 export async function listNotes(query = ""): Promise<Note[]> {
@@ -41,4 +46,9 @@ export async function updateNote(
 
 export async function deleteNote(noteId: string): Promise<void> {
   await invoke("delete_note", { noteId });
+}
+
+export async function indexNote(noteId: string, revision: string): Promise<Note | undefined> {
+  const result = await invoke<{ note?: Note }>("index_note", { noteId, revision });
+  return result.note;
 }
