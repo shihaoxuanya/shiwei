@@ -13,6 +13,24 @@ from shiwei_ai.retrieval.query_plan import plan_query
 from shiwei_ai.search_terms import search_terms
 
 
+def is_standalone_arithmetic(query: str) -> bool:
+    """Route only self-contained numeric expressions, never memory word problems.
+
+    This classifies text; it does not evaluate code or calculate an answer.
+    Full matching prevents a file title, date or personal question from bypassing
+    evidence selection. Ambiguous subtraction-only dates stay on normal routing.
+    """
+    text = query.strip()
+    if len(text) > 200:
+        return False
+    text = re.sub(r"^(?:请问|请计算|帮我计算|计算一下|计算)\s*", "", text)
+    text = re.sub(r"\s*(?:等于多少|是多少|等于几|等于|=)?\s*[？?。！!]*$", "", text)
+    if re.fullmatch(r"\d{4}\s*-\s*\d{1,2}(?:\s*-\s*\d{1,2})?", text):
+        return False
+    number = r"[+-]?\s*\d+(?:\.\d+)?"
+    return bool(re.fullmatch(rf"{number}(?:\s*[+\-*/×÷]\s*{number})+", text))
+
+
 def is_live_weather_request(query: str) -> bool:
     """A current forecast needs a live source, not coincidentally matching notes.
 
@@ -131,6 +149,13 @@ class Assistant:
             return local("你好，我是拾微。可以帮你找回资料、总结记录，也可以聊聊日常问题。", "general")
         if is_live_weather_request(query):
             return local("我目前没有实时天气查询能力，无法确认当前或预报的气温和天气。", "general")
+        if is_standalone_arithmetic(query):
+            if self.gateway is None:
+                return local("尚未配置对话模型。请前往设置保存模型配置；本地查找文件仍然可用。", "general") | {"notice": "provider_not_configured"}
+            # No library scan, embedding calls or remote classifier are needed.
+            # This expression is self-contained, so don't send unrelated history.
+            answer = ChatService(self.retriever, self.gateway).general(query, [], on_token)
+            return {**result, "answer": answer, "answerKind": "general", "mode": "ai"}
         query_plan = plan_query(query)
         matches = self.match_sources(query)
         overview = bool(re.search(r"(资料库|知识库).*(有什么|有哪些|概览|内容)|^(我有|我导入了|列出|查看全部).*(资料|文件)|^(有哪些资料|有什么资料|资料概览)$", compact))
