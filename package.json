@@ -1,6 +1,6 @@
 {
   "name": "shiwei",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "private": true,
   "description": "拾微：你不用整理，它替你记住。",
   "packageManager": "pnpm@11.19.0",

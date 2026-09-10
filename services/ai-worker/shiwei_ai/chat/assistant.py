@@ -20,15 +20,41 @@ def is_standalone_arithmetic(query: str) -> bool:
     Full matching prevents a file title, date or personal question from bypassing
     evidence selection. Ambiguous subtraction-only dates stay on normal routing.
     """
-    text = query.strip()
+    text = query.strip().translate(str.maketrans("０１２３４５６７８９＋－＊／（）＝？", "0123456789+-*/()=?"))
     if len(text) > 200:
         return False
     text = re.sub(r"^(?:请问|请计算|帮我计算|计算一下|计算)\s*", "", text)
-    text = re.sub(r"\s*(?:等于多少|是多少|等于几|等于|=)?\s*[？?。！!]*$", "", text)
-    if re.fullmatch(r"\d{4}\s*-\s*\d{1,2}(?:\s*-\s*\d{1,2})?", text):
+    text = re.sub(r"\s*(?:等于多少|是多少|等于几|等于|=)?[呀啊呢吗]?\s*[？?。！!]*$", "", text)
+    if re.fullmatch(r"\d{4}\s*[-/]\s*\d{1,2}(?:\s*[-/]\s*\d{1,2})?", text):
         return False
-    number = r"[+-]?\s*\d+(?:\.\d+)?"
-    return bool(re.fullmatch(rf"{number}(?:\s*[+\-*/×÷]\s*{number})+", text))
+    for word, symbol in [("乘以", "*"), ("除以", "/"), ("加上", "+"), ("减去", "-"), ("加", "+"), ("减", "-"), ("乘", "*"), ("除", "/")]:
+        text = text.replace(word, symbol)
+    text = re.sub(r"\s+", "", text)
+    number = r"(?:\d+(?:\.\d+)?|[零〇一二两三四五六七八九十百千万亿]+(?:点[零一二三四五六七八九]+)?)"
+    tokens = re.findall(rf"{number}|[()+\-*/×÷]", text)
+    if "".join(tokens) != text:
+        return False
+    # Small grammar, not eval: balanced parentheses and complete operands only.
+    operand, depth, operators = True, 0, 0
+    unary = False
+    for token in tokens:
+        if operand:
+            if token == "(":
+                depth += 1
+                unary = False
+            elif token in {"+", "-"} and not unary:
+                unary = True
+            elif re.fullmatch(number, token):
+                operand, unary = False, False
+            else:
+                return False
+        elif token == ")" and depth:
+            depth -= 1
+        elif token in {"+", "-", "*", "/", "×", "÷"}:
+            operand, operators = True, operators + 1
+        else:
+            return False
+    return not operand and depth == 0 and operators > 0
 
 
 def is_live_weather_request(query: str) -> bool:

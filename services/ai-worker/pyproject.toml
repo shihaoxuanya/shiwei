@@ -1,6 +1,6 @@
 [project]
 name = "shiwei-ai"
-version = "0.3.3"
+version = "0.3.4"
 description = "拾微本地知识处理与检索 Worker"
 requires-python = ">=3.11,<3.14"
 dependencies = [
