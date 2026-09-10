@@ -45,10 +45,17 @@ def test_text_pdf_import_is_offline_searchable_and_page_located(tmp_path, monkey
 def test_scanned_pdf_uses_local_ocr(tmp_path):
     pdf = tmp_path / "scan.pdf"
     make_pdf(pdf, scanned=True)
-    result = DocumentParser().parse(pdf, pdf.name)
+    progress = []
+    result = DocumentParser().parse(pdf, pdf.name, progress_sink=progress.append)
     text = " ".join(block.text for section in result.sections for block in section.blocks)
     assert "MOUNTED" in text
     assert result.sections[-1].page_number == 2
+    assert progress == [
+        {"currentPage": 1, "totalPages": 2, "stage": "reading"},
+        {"currentPage": 1, "totalPages": 2, "stage": "ocr"},
+        {"currentPage": 2, "totalPages": 2, "stage": "reading"},
+        {"currentPage": 2, "totalPages": 2, "stage": "ocr"},
+    ]
 
 
 def test_password_protected_pdf_has_actionable_error(tmp_path):
@@ -104,5 +111,6 @@ def test_pdf_page_limit_and_chinese_content(tmp_path):
         document.drawString(40, 700, "Page")
         document.showPage()
     document.save()
-    with pytest.raises(ParseError, match="300"):
-        DocumentParser().parse(many, many.name)
+    parsed = DocumentParser().parse(many, many.name)
+    assert len(parsed.sections) == 301
+    assert parsed.sections[-1].page_number == 301

@@ -134,6 +134,7 @@ class HybridRetriever:
                           c.page_number, c.sheet_name, c.slide_number, c.heading_path,
                           d.title, s.original_filename, s.original_path, s.stored_path, s.imported_at,
                           s.id AS source_id, s.source_type, n.id AS note_id,
+                          s.original_url, s.final_url, s.captured_at, s.body_hash,
                           n.created_at AS note_created_at, n.updated_at AS note_updated_at
                    FROM chunks c JOIN documents d ON d.id=c.document_id
                    JOIN sources s ON s.id=d.source_id LEFT JOIN notes n ON n.source_id=s.id
@@ -147,6 +148,7 @@ class HybridRetriever:
                 "documentTitle": row["title"], "filename": row["original_filename"],
                 "sourcePath": row["original_path"], "storedPath": row["stored_path"],
                 "importedAt": row["imported_at"], "sourceId": row["source_id"], "sourceType": row["source_type"],
+                "originalUrl": row["original_url"], "finalUrl": row["final_url"], "capturedAt": row["captured_at"], "bodyHash": row["body_hash"],
                 "noteId": row["note_id"], "noteCreatedAt": row["note_created_at"], "noteUpdatedAt": row["note_updated_at"],
                 "pageNumber": row["page_number"], "sheetName": row["sheet_name"],
                 "slideNumber": row["slide_number"], "headingPath": row["heading_path"],

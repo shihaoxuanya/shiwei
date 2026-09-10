@@ -15,7 +15,11 @@ export type Citation = {
   slideNumber?: number;
   headingPath?: string;
   snippet: string;
-  sourceType?: "imported_file" | "user_note";
+  sourceType?: "imported_file" | "user_note" | "web_page";
+  sourceId?: string;
+  originalUrl?: string;
+  finalUrl?: string;
+  capturedAt?: string;
   noteId?: string;
   noteCreatedAt?: string;
   noteUpdatedAt?: string;
@@ -47,7 +51,10 @@ export type SourceMatch = {
   storedPath: string;
   importedAt: string;
   status: string;
-  sourceType?: "imported_file" | "user_note";
+  sourceType?: "imported_file" | "user_note" | "web_page";
+  originalUrl?: string;
+  finalUrl?: string;
+  capturedAt?: string;
   noteId?: string;
   noteCreatedAt?: string;
   noteUpdatedAt?: string;

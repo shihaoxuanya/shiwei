@@ -264,26 +264,20 @@ impl WorkerClient {
             writer.flush()?;
         }
 
-        // OCR and batch indexing are long-running local work, not chat requests.
-        let timeout = if matches!(
-            method,
-            "import_paths" | "reindex_source" | "rebuild_embeddings"
-        ) {
-            Duration::from_secs(1800)
-        } else {
-            self.timeout
-        };
-        let deadline = Instant::now() + timeout;
+        // A client timeout cannot stop a writer in Python. Keep long operations
+        // on this exclusive lane until their real terminal response/worker exit.
+        let wait_until_terminal = waits_for_terminal_response(method);
+        let deadline = Instant::now() + self.timeout;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if !relocating && remaining.is_zero() {
+            if !wait_until_terminal && remaining.is_zero() {
                 if let Some(id) = &cancellable_chat { let _ = self.cancel_chat(id); }
                 return Err(WorkerError::Timeout);
             }
             // A timeout must not tell the UI migration failed while Python is
             // still verifying or about to atomically commit the new location.
             // Hold the exclusive lane until the final response or process exit.
-            let raw_response = if relocating {
+            let raw_response = if wait_until_terminal {
                 process.responses.recv().map_err(|_| WorkerError::Exited)?
             } else {
                 process
@@ -301,7 +295,7 @@ impl WorkerClient {
                 Ok(value) => value,
                 // A stray stdout diagnostic is not a terminal migration result.
                 // Never log the content or release the library lock early.
-                Err(_) if relocating => continue,
+                Err(_) if wait_until_terminal => continue,
                 Err(error) => return Err(WorkerError::Json(error)),
             };
             if envelope.get("event").is_some() {
@@ -327,6 +321,10 @@ impl WorkerClient {
 
 fn event_belongs_to(event: &Value, request_id: &str) -> bool {
     event.get("requestId").and_then(Value::as_str) == Some(request_id)
+}
+
+fn waits_for_terminal_response(method: &str) -> bool {
+    matches!(method, "relocate_library" | "import_paths" | "import_url" | "reindex_source" | "rebuild_embeddings")
 }
 
 impl Drop for WorkerClient {
@@ -607,6 +605,41 @@ mod tests {
         assert!(client.request_with_events::<Value, _>("relocate_library", json!({}), |_|{}).is_err());
         assert!(!client.is_relocating());
         assert!(client.process.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn all_library_long_tasks_wait_for_terminal_result_but_chat_keeps_deadline() {
+        for method in ["import_paths", "import_url", "reindex_source", "rebuild_embeddings"] {
+            assert!(waits_for_terminal_response(method));
+            let python = development_python_path(&worker_project_dir_from(Path::new(env!("CARGO_MANIFEST_DIR"))), cfg!(windows));
+            let mut command = Command::new(python);
+            command.args(["-c", "import json,sys,time; r=json.loads(sys.stdin.readline()); print('stray diagnostic',flush=True); time.sleep(0.1); print(json.dumps({'jsonrpc':'2.0','protocol_version':'1.0','id':r['id'],'result':{'completed':True}}),flush=True)"]);
+            configure_worker_process(&mut command);
+            let mut child = command.spawn().unwrap();
+            let stdin = Arc::new(Mutex::new(child.stdin.take().unwrap()));
+            let stdout = child.stdout.take().unwrap();
+            let (sender, responses) = mpsc::channel();
+            thread::spawn(move || { for line in BufReader::new(stdout).lines().map_while(Result::ok) { let _ = sender.send(line); } });
+            let mut client = WorkerClient::new(); client.timeout = Duration::from_millis(1);
+            *client.process.lock().unwrap() = Some(WorkerProcess { child, stdin, responses });
+            let result: Value = client.request(method, json!({})).unwrap();
+            assert_eq!(result["completed"], true);
+        }
+        assert!(!waits_for_terminal_response("chat"));
+        assert!(!waits_for_terminal_response("worker_info"));
+    }
+
+    #[test]
+    fn new_web_import_is_blocked_during_relocation_and_long_task_exit_is_terminal() {
+        let client = WorkerClient::new(); client.relocating.store(true, Ordering::SeqCst);
+        assert!(client.request::<Value>("import_url", json!({"url":"https://example.com"})).is_err());
+        let python = development_python_path(&worker_project_dir_from(Path::new(env!("CARGO_MANIFEST_DIR"))), cfg!(windows));
+        let mut command = Command::new(python); command.args(["-c", "import sys,time;sys.stdin.readline();time.sleep(0.05)"]); configure_worker_process(&mut command);
+        let mut child = command.spawn().unwrap(); let stdin = Arc::new(Mutex::new(child.stdin.take().unwrap())); let stdout = child.stdout.take().unwrap();
+        let (sender, responses) = mpsc::channel(); thread::spawn(move || { for line in BufReader::new(stdout).lines().map_while(Result::ok) { let _ = sender.send(line); } });
+        let client = WorkerClient::new(); *client.process.lock().unwrap() = Some(WorkerProcess { child, stdin, responses });
+        assert!(matches!(client.request::<Value>("import_url", json!({})), Err(WorkerError::Exited)));
+        assert!(client.process.try_lock().is_ok());
     }
 
     #[test]

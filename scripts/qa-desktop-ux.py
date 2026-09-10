@@ -24,9 +24,11 @@ from shiwei_ai.worker.server import WorkerMethodError
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=1422)
+    parser.add_argument("--ui-port", type=int, default=1420)
     parser.add_argument("--empty", action="store_true")
     parser.add_argument("--root", type=Path)
     options = parser.parse_args()
+    origin = f"http://127.0.0.1:{options.ui_port}"
     root = (options.root or Path(tempfile.mkdtemp(prefix="shiwei-desktop-ux-"))).resolve()
     marker = root / "qa-fixture.json"
     if not marker.is_file():
@@ -59,7 +61,7 @@ def main():
         return server
 
     server = executor.submit(initialize).result()
-    methods = {"ping", "worker_info", "chat", "cancel_chat", "get_conversation", "delete_conversation", "list_conversations", "list_sources", "import_paths", "delete_source", "reindex_source", "search_lexical", "search_hybrid", "list_notes", "get_note", "create_note", "update_note", "index_note", "delete_note", "provider_status", "index_status", "qa_fixture_paths", "qa_release_status", "qa_analytics_consent"}
+    methods = {"ping", "worker_info", "chat", "cancel_chat", "get_conversation", "delete_conversation", "list_conversations", "list_sources", "import_paths", "import_url", "get_web_snapshot", "delete_source", "reindex_source", "search_lexical", "search_hybrid", "list_notes", "get_note", "create_note", "update_note", "index_note", "delete_note", "provider_status", "index_status", "qa_fixture_paths", "qa_release_status", "qa_analytics_consent"}
     # Mirror a fresh production installation's disclosed default, but remain
     # entirely in memory: this QA bridge has no analytics sender or endpoint.
     consent = {"enabled": True, "choice": "enabled", "needsChoice": False}
@@ -71,12 +73,12 @@ def main():
 
         def do_OPTIONS(self):
             self.send_response(204)
-            self.send_header("Access-Control-Allow-Origin", "http://127.0.0.1:1420")
+            self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.end_headers()
 
         def do_POST(self):
-            if self.headers.get("Origin") != "http://127.0.0.1:1420" or self.path != "/rpc":
+            if self.headers.get("Origin") != origin or self.path != "/rpc":
                 self.send_error(403)
                 return
             size = int(self.headers.get("Content-Length", "0"))
@@ -95,7 +97,7 @@ def main():
                 return
             self.send_response(200)
             self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
-            self.send_header("Access-Control-Allow-Origin", "http://127.0.0.1:1420")
+            self.send_header("Access-Control-Allow-Origin", origin)
             self.end_headers()
             def emit(envelope):
                 try:

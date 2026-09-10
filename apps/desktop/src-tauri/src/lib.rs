@@ -62,9 +62,12 @@ struct ImportItem {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ImportFailure {
     path: String,
     reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -99,6 +102,16 @@ struct SourceSummary {
     imported_at: String,
     status: String,
     error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    original_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    final_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    captured_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    body_hash: Option<String>,
     #[serde(default)]
     retrieval: Option<serde_json::Value>,
 }
@@ -239,6 +252,46 @@ async fn list_sources(state: State<'_, WorkerState>) -> Result<Vec<SourceSummary
     .map_err(|error| format!("读取资料任务异常：{error}"))?
     .map_err(|error| error.user_message())?;
     Ok(result.sources)
+}
+
+#[tauri::command]
+async fn import_url(app: tauri::AppHandle, state: State<'_, WorkerState>, url: String) -> Result<ImportReport, String> {
+    // Python performs the public-address, DNS pinning and redirect checks. Never
+    // attach provider credentials or log user URLs in native diagnostics.
+    validate_web_url(&url)?;
+    let client = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || client.request_with_events(
+        "import_url", serde_json::json!({"url": url}), move |event| {
+            if event.get("event").and_then(|v| v.as_str()) == Some("job_progress") {
+                if let Some(data) = event.get("data") { let _ = app.emit("import-progress", data.clone()); }
+            }
+        },
+    )).await.map_err(|_| "网页保存任务中断，请重试。".to_string())?.map_err(|e| e.user_message())
+}
+
+#[tauri::command]
+async fn get_web_snapshot(state: State<'_, WorkerState>, source_id: String) -> Result<serde_json::Value, String> {
+    let client = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || client.request("get_web_snapshot", serde_json::json!({"sourceId": source_id})))
+        .await.map_err(|_| "读取网页快照失败。".to_string())?.map_err(|e| e.user_message())
+}
+
+fn validate_web_url(value: &str) -> Result<reqwest::Url, String> {
+    let invalid = || "请输入有效的 HTTP 或 HTTPS 网页地址，不要包含账号密码。".to_string();
+    if value.len() > 8192 || value.chars().any(char::is_control) { return Err(invalid()); }
+    let url = reqwest::Url::parse(value).map_err(|_| invalid())?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() { return Err(invalid()); }
+    Ok(url)
+}
+
+#[tauri::command]
+async fn open_web_source(app: tauri::AppHandle, state: State<'_, WorkerState>, source_id: String) -> Result<(), String> {
+    // Only resolve a stored snapshot identity; renderer-controlled raw URLs are
+    // never forwarded to the OS opener, and raw HTML archives stay inert.
+    let snapshot = get_web_snapshot(state, source_id).await?;
+    let url = snapshot.get("finalUrl").and_then(|v| v.as_str()).ok_or_else(|| "网页快照没有有效网址。".to_string())?;
+    let url = validate_web_url(url)?;
+    app.opener().open_url(url.as_str(), None::<&str>).map_err(|_| "无法打开原网页，请检查默认浏览器。".to_string())
 }
 
 #[tauri::command]
@@ -632,14 +685,20 @@ async fn delete_source(
 
 #[tauri::command]
 async fn reindex_source(
+    app: tauri::AppHandle,
     state: State<'_, WorkerState>,
     source_id: String,
 ) -> Result<serde_json::Value, String> {
     let client = state.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        client.request(
+        client.request_with_events(
             "reindex_source",
             serde_json::json!({ "sourceId": source_id }),
+            move |event| {
+                if event.get("event").and_then(|v| v.as_str()) == Some("job_progress") {
+                    if let Some(data) = event.get("data") { let _ = app.emit("import-progress", data.clone()); }
+                }
+            },
         )
     })
     .await
@@ -701,6 +760,9 @@ pub fn run() {
             worker_info,
             library_relocate,
             import_paths,
+            import_url,
+            get_web_snapshot,
+            open_web_source,
             list_sources,
             search_lexical,
             search_hybrid,
@@ -763,5 +825,23 @@ impl WorkerError {
                 "无法连接本地 AI Worker，请查看应用日志".to_string()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod web_source_tests {
+    use super::*;
+    #[test]
+    fn web_opener_accepts_only_http_urls_without_credentials() {
+        for value in ["https://example.com/article?q=中文", "http://example.com/"] { assert!(validate_web_url(value).is_ok()); }
+        for value in ["file:///C:/secret", "javascript:alert(1)", "data:text/html,test", "https://user:secret@example.com", "https://user@example.com", "https://example.com\n", "not a url"] { assert!(validate_web_url(value).is_err(), "unsafe URL accepted"); }
+    }
+    #[test]
+    fn source_metadata_and_retry_kind_survive_native_serialization() {
+        let source: SourceSummary = serde_json::from_value(serde_json::json!({"id":"w1","originalPath":"","storedPath":"","filename":"网页标题","contentHash":"hash","size":12,"mimeType":"text/html","importedAt":"2026-09-10","status":"searchable","sourceType":"web_page","originalUrl":"https://example.com/a","finalUrl":"https://example.com/b","capturedAt":"2026-09-10","bodyHash":"body"})).unwrap();
+        let wire = serde_json::to_value(source).unwrap();
+        assert_eq!(wire["sourceType"], "web_page"); assert_eq!(wire["bodyHash"], "body"); assert_eq!(wire["originalUrl"], "https://example.com/a");
+        let failure: ImportFailure = serde_json::from_value(serde_json::json!({"path":"https://example.com/a","reason":"超时","inputKind":"url"})).unwrap();
+        assert_eq!(serde_json::to_value(failure).unwrap()["inputKind"], "url");
     }
 }

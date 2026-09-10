@@ -61,6 +61,8 @@ class WorkerServer:
             "relocate_library": self._relocate_library,
             "provider_clear": self._provider_clear,
             "import_paths": self._import_paths,
+            "import_url": self._import_url,
+            "get_web_snapshot": self._get_web_snapshot,
             "list_sources": self._list_sources,
             "delete_source": self._delete_source,
             "reindex_source": self._reindex_source,
@@ -204,6 +206,21 @@ class WorkerServer:
         if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
             raise ValueError("paths 必须是字符串数组")
         result = self._get_importer().import_paths(paths, self._emit_job_progress)
+        return self._finish_import(result)
+
+    def _import_url(self, params: dict[str, Any]) -> dict[str, Any]:
+        url = params.get("url")
+        if not isinstance(url, str) or not url.strip() or len(url) > 8192:
+            raise WorkerMethodError("INVALID_URL", "请输入有效的公开 HTTP 或 HTTPS 网页地址")
+        return self._finish_import(self._get_importer().import_url(url, self._emit_job_progress))
+
+    def _get_web_snapshot(self, params: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return self._get_importer().get_web_snapshot(self._require_source_id(params))
+        except ValueError as error:
+            raise WorkerMethodError("SNAPSHOT_UNAVAILABLE", str(error)) from None
+
+    def _finish_import(self, result: dict[str, Any]) -> dict[str, Any]:
         if self._has_embedding() and result["summary"]["imported"] > 0:
             try:
                 self._emit_job_progress({"jobId": result["jobId"], "progress": 1, "currentStep": "资料可按关键词查找，正在准备智能检索", "processed": result["summary"]["imported"], "total": result["summary"]["imported"]})
@@ -215,11 +232,11 @@ class WorkerServer:
                     needs_rebuild = needs_rebuild or partial.get("requiresRebuild", False)
                 result["embeddingIndex"] = {"indexed": indexed, "requiresRebuild": needs_rebuild}
             except Exception as error:
-                logger.exception("Embedding refresh failed after import")
+                logger.warning("Embedding refresh failed after import")
                 result["embeddingIndex"] = {
                     "status": "failed",
                     "message": "资料已保存并可全文搜索，但语义索引更新失败",
-                    "reason": str(error),
+                    "reason": "请检查智能检索服务连接后重新处理",
                 }
         return result
 
@@ -256,7 +273,11 @@ class WorkerServer:
         return result
 
     def _reindex_source(self, params: dict[str, Any]) -> dict[str, Any]:
-        result = self._get_importer().reindex_source(self._require_source_id(params))
+        def progress(page):
+            current, total = page["currentPage"], page["totalPages"]
+            self._emit_job_progress({"jobId": self._active_request_id, "progress": 0.9 * current / max(total, 1),
+                "currentStep": f"正在{'识别扫描页' if page['stage'] == 'ocr' else '解析 PDF'} {current}/{total} 页", "processed": 0, "total": 1})
+        result = self._get_importer().reindex_source(self._require_source_id(params), progress)
         if self._has_embedding():
             result["embeddingIndex"] = self._index_source_vectors(self._require_source_id(params))
         return result
@@ -269,7 +290,7 @@ class WorkerServer:
         if not isinstance(limit, int) or not 1 <= limit <= 100:
             raise ValueError("limit 必须是 1 到 100 的整数")
         source_type = params.get("sourceType")
-        if source_type not in (None, "imported_file", "user_note"):
+        if source_type not in (None, "imported_file", "user_note", "web_page"):
             raise WorkerMethodError("INVALID_SOURCE_TYPE", "资料类型不正确")
         search = LexicalSearch(self._get_importer().database)
         return {"query": query, "hits": search.search(query, limit, source_type=source_type)}
@@ -495,6 +516,7 @@ class WorkerServer:
                 SELECT c.citation_id, c.document_id, c.chunk_id, c.source_filename,
                        c.page_number, c.sheet_name, c.slide_number, c.heading_path, c.snippet,
                        s.original_path, s.stored_path, s.imported_at, s.source_type,
+                       s.id AS source_id, s.original_url, s.final_url, s.captured_at, s.body_hash,
                        n.id AS note_id, n.created_at AS note_created_at,
                        n.updated_at AS note_updated_at, k.mentioned_dates
                 FROM citations c
@@ -532,6 +554,11 @@ class WorkerServer:
                             "headingPath": item["heading_path"],
                             "snippet": item["snippet"],
                             "sourceType": item["source_type"],
+                            "sourceId": item["source_id"],
+                            "originalUrl": item["original_url"],
+                            "finalUrl": item["final_url"],
+                            "capturedAt": item["captured_at"],
+                            "bodyHash": item["body_hash"],
                             "noteId": item["note_id"],
                             "noteCreatedAt": item["note_created_at"],
                             "noteUpdatedAt": item["note_updated_at"],
@@ -880,6 +907,11 @@ class WorkerServer:
             "headingPath": item.heading_path,
             "snippet": item.snippet,
             "sourceType": item.source_type,
+            "sourceId": item.source_id,
+            "originalUrl": item.original_url,
+            "finalUrl": item.final_url,
+            "capturedAt": item.captured_at,
+            "bodyHash": item.body_hash,
             "noteId": item.note_id,
             "noteCreatedAt": item.note_created_at,
             "noteUpdatedAt": item.note_updated_at,
@@ -902,6 +934,11 @@ class WorkerServer:
             "headingPath": item.get("heading_path"),
             "snippet": item["snippet"],
             "sourceType": item.get("source_type", "imported_file"),
+            "sourceId": item.get("source_id"),
+            "originalUrl": item.get("original_url"),
+            "finalUrl": item.get("final_url"),
+            "capturedAt": item.get("captured_at"),
+            "bodyHash": item.get("body_hash"),
             "noteId": item.get("note_id"),
             "noteCreatedAt": item.get("note_created_at"),
             "noteUpdatedAt": item.get("note_updated_at"),

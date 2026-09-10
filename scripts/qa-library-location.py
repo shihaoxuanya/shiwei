@@ -15,12 +15,13 @@ from uuid import uuid4
 
 
 class Client:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, worker: Path | None = None):
         env = {**os.environ, "SHIWEI_DATA_DIR": str(root / "original-library"),
                "SHIWEI_LOCATION_CONFIG": str(root / "config" / "library-location.json"),
                "SHIWEI_TELEMETRY_DISABLED": "1", "PYTHONIOENCODING": "utf-8"}
         project = Path(__file__).resolve().parents[1] / "services" / "ai-worker"
-        self.process = subprocess.Popen([sys.executable, "-m", "shiwei_ai.worker.main"], cwd=project,
+        command = [str(worker.resolve())] if worker else [sys.executable, "-m", "shiwei_ai.worker.main"]
+        self.process = subprocess.Popen(command, cwd=project,
                                         env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
                                         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
@@ -61,7 +62,9 @@ class Client:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
-    root = parser.parse_args().root.resolve()
+    parser.add_argument("--worker", type=Path)
+    args = parser.parse_args()
+    root = args.root.resolve()
     if root.exists() and any(root.iterdir()):
         raise RuntimeError("Refusing a non-empty QA directory")
     root.mkdir(parents=True, exist_ok=True)
@@ -73,7 +76,7 @@ def main():
     original.write_text("独立合成资料：水杉数据库恢复演练，SQL_ID 8v5abc。", encoding="utf-8")
     original_hash = hashlib.sha256(original.read_bytes()).hexdigest()
     note_text = "合成会议记录：2025年9月3日讨论Oracle至TiDB迁移。单次38~50天，增量追平7~14天。"
-    client = Client(root)
+    client = Client(root, args.worker)
     try:
         imported = client.call("import_paths", {"paths": [str(original)]})
         assert imported["summary"]["imported"] == 1
@@ -96,7 +99,7 @@ def main():
         assert {"preparing", "copying", "verifying", "switching"} <= set(phases)
     finally:
         client.close()
-    restarted = Client(root)
+    restarted = Client(root, args.worker)
     try:
         assert restarted.call("worker_info")["dataDir"] == after
         assert restarted.call("get_note", {"noteId": note["id"]})["note"]["content"] == note_text

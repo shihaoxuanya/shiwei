@@ -46,10 +46,23 @@ it('keeps file operations accessible and deletes by managed source identity only
 it('exposes actual failed source reason and retry, never calls saved equivalent to semantic ready',async()=>{
   const failed={...source,status:'failed' as const,error:'PDF 已损坏，请重新导入'};
   render(<LibraryPage {...props} sources={[failed]}/>);expect(screen.getByText(failed.error)).toBeInTheDocument();
-  fireEvent.click(screen.getByRole('button',{name:'验收报告.txt的更多操作'}));fireEvent.click(screen.getByRole('button',{name:'重新处理'}));await waitFor(()=>expect(reindexSource).toHaveBeenCalledWith('f1'));
+  fireEvent.click(screen.getByRole('button',{name:'验收报告.txt的更多操作'}));fireEvent.click(screen.getByRole('button',{name:'重新处理'}));await waitFor(()=>expect(reindexSource).toHaveBeenCalledWith('f1',expect.any(Function)));
   expect(sourceStatus(source)).toBe('可按关键词查找');expect(sourceStatus({...source,retrieval:{keyword:'ready',semantic:'requires_rebuild'}})).not.toBe('已就绪');
 });
 it('shows a compact real recent list, no fake recent contents for an empty library',()=>{
   const v=render(<HomePage {...props} notes={[]} onNewNote={vi.fn()} onOpenNote={vi.fn()} onPrivacy={vi.fn()}/>);expect(screen.getByText('最近留下的')).toBeInTheDocument();expect(screen.getByText(source.filename)).toBeInTheDocument();
   v.rerender(<HomePage {...props} sources={[]} notes={[]} onNewNote={vi.fn()} onOpenNote={vi.fn()} onPrivacy={vi.fn()}/>);expect(screen.queryByText('最近留下的')).not.toBeInTheDocument();expect(screen.getByRole('button',{name:'写一条笔记'})).toBeInTheDocument();
+});
+
+it('keeps Home PDF retry busy and displays page progress until the operation completes',async()=>{
+  let finish!:()=>void;
+  vi.mocked(reindexSource).mockImplementationOnce((_id,onProgress)=>{
+    onProgress?.({jobId:'j',progress:.4,currentStep:'正在识别扫描页 301/600 页',processed:0,total:1});
+    return new Promise(resolve=>{finish=resolve;});
+  });
+  render(<HomePage {...props} sources={[{...source,status:'failed',error:'暂时失败'}]} notes={[]} onNewNote={vi.fn()} onOpenNote={vi.fn()} onPrivacy={vi.fn()}/>);
+  fireEvent.click(screen.getByRole('button',{name:'重试'}));
+  expect(screen.getByText('正在识别扫描页 301/600 页')).toBeVisible();expect(screen.getByRole('button',{name:'正在处理'})).toBeDisabled();
+  expect(reindexSource).toHaveBeenCalledTimes(1);
+  await act(async()=>finish());expect(screen.getByRole('button',{name:'重试'})).toBeEnabled();expect(props.onRefresh).toHaveBeenCalled();
 });

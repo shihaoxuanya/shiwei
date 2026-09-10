@@ -15,7 +15,7 @@ export type ImportReport = {
   jobId: string;
   imported: ImportItem[];
   skipped: ImportItem[];
-  failed: Array<{ path: string; reason: string }>;
+  failed: Array<{ path: string; reason: string; inputKind?: "url" }>;
   summary: { imported: number; skipped: number; failed: number };
   embeddingIndex?: { status?: string; message?: string; requiresRebuild?: boolean };
 };
@@ -27,6 +27,8 @@ export type ImportProgress = {
   processed: number;
   total: number;
   filename?: string;
+  pageNumber?: number;
+  totalPages?: number;
 };
 
 export type SourceSummary = {
@@ -40,6 +42,11 @@ export type SourceSummary = {
   importedAt: string;
   status: "processing" | "searchable" | "failed";
   error?: string;
+  sourceType?: "imported_file" | "web_page";
+  originalUrl?: string;
+  finalUrl?: string;
+  capturedAt?: string;
+  bodyHash?: string;
   retrieval?: { keyword: "ready" | "unavailable"; semantic: "disabled" | "pending" | "ready" | "failed" | "requires_rebuild" };
 };
 
@@ -92,13 +99,36 @@ export async function listSources(): Promise<SourceSummary[]> {
   return invoke<SourceSummary[]>("list_sources");
 }
 
+export async function importUrl(url: string, onProgress?: (progress: ImportProgress) => void): Promise<ImportReport> {
+  ensureDesktop();
+  const unlisten = onProgress ? await listen<ImportProgress>("import-progress", event => onProgress(event.payload)) : undefined;
+  try { return await invoke<ImportReport>("import_url", { url }); } finally { unlisten?.(); }
+}
+
+export type WebSnapshot = {
+  sourceId: string; title: string; originalUrl: string; finalUrl: string; capturedAt: string;
+  sections: Array<{ heading?: string; headingPath: string[]; blocks: Array<{ kind: string; text: string }> }>;
+  chunks?: Array<{ chunkId: string; sectionIndex: number }>;
+};
+
+export async function getWebSnapshot(sourceId: string): Promise<WebSnapshot> {
+  return invoke<WebSnapshot>("get_web_snapshot", { sourceId });
+}
+export async function openWebSource(sourceId: string): Promise<void> {
+  await invoke("open_web_source", { sourceId });
+}
+
 export async function deleteSource(sourceId: string): Promise<void> {
   await invoke("delete_source", { sourceId });
 }
 
-export async function reindexSource(sourceId: string): Promise<void> {
+export async function reindexSource(sourceId: string, onProgress?: (progress: ImportProgress) => void): Promise<void> {
   const done = beginLibraryActivity("正在重新处理资料");
-  try { await invoke("reindex_source", { sourceId }); } finally { done(); }
+  let unlisten: (() => void) | undefined;
+  try {
+    if (onProgress) unlisten = await listen<ImportProgress>("import-progress", event => onProgress(event.payload));
+    await invoke("reindex_source", { sourceId });
+  } finally { unlisten?.(); done(); }
 }
 
 export async function openSource(path: string): Promise<void> {

@@ -212,6 +212,17 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
         ALTER TABLE embedding_versions ADD COLUMN search_text_version INTEGER NOT NULL DEFAULT 0;
         """,
     ),
+    (
+        7,
+        """
+        ALTER TABLE sources ADD COLUMN original_url TEXT;
+        ALTER TABLE sources ADD COLUMN final_url TEXT;
+        ALTER TABLE sources ADD COLUMN captured_at TEXT;
+        ALTER TABLE sources ADD COLUMN body_hash TEXT;
+        CREATE UNIQUE INDEX idx_web_snapshot ON sources(original_url, body_hash)
+          WHERE source_type = 'web_page';
+        """,
+    ),
 )
 
 
@@ -321,15 +332,19 @@ class Database:
         ).fetchone()
 
     def insert_source(self, values: dict[str, Any]) -> None:
+        values = {"source_type": "imported_file", "original_url": None,
+                  "final_url": None, "captured_at": None, "body_hash": None, **values}
         with self.transaction() as connection:
             connection.execute(
                 """
                 INSERT INTO sources(
                   id, original_path, original_filename, stored_path, content_hash,
-                  size, mime_type, created_at, imported_at, status, error
+                  size, mime_type, created_at, imported_at, status, error,
+                  source_type, original_url, final_url, captured_at, body_hash
                 ) VALUES (
                   :id, :original_path, :original_filename, :stored_path, :content_hash,
-                  :size, :mime_type, :created_at, :imported_at, :status, :error
+                  :size, :mime_type, :created_at, :imported_at, :status, :error,
+                  :source_type, :original_url, :final_url, :captured_at, :body_hash
                 )
                 """,
                 values,
@@ -339,9 +354,10 @@ class Database:
         rows = self.connection.execute(
             """
             SELECT id, original_path, original_filename, stored_path, content_hash,
-                   size, mime_type, imported_at, status, error, source_type
+                   size, mime_type, imported_at, status, error, source_type,
+                   original_url, final_url, captured_at, body_hash
             FROM sources
-            WHERE source_type = 'imported_file'
+            WHERE source_type IN ('imported_file', 'web_page')
             ORDER BY imported_at DESC
             """
         ).fetchall()

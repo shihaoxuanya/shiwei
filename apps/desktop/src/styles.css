@@ -2,6 +2,26 @@
 @tailwind components;
 @tailwind utilities;
 
+.web-dialog-backdrop { position: fixed; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center; padding: 24px; background: #312f2940; }
+.web-link-dialog { width: min(520px,100%); max-height: calc(100vh - 48px); overflow-y: auto; padding: 26px; border: 1px solid #ded8cb; border-radius: 16px; background: #fcfbf7; box-shadow: 0 20px 60px #332f252e; }
+.web-link-dialog h2 { font-size: 21px; font-weight: 600; }
+.web-link-dialog p { margin: 12px 0; font-size: 13px; line-height: 1.8; }
+.web-link-dialog label { display: block; margin-top: 20px; font-size: 14px; }
+.web-link-dialog input { width: 100%; margin-top: 8px; padding: 11px 12px; border: 1px solid #dcd6c8; border-radius: 9px; background: white; }
+.web-link-dialog .action-row { justify-content: flex-end; margin-top: 20px; }
+.web-snapshot-drawer { position: fixed; z-index: 70; right: 0; top: 0; bottom: 0; display: flex; flex-direction: column; width: min(560px,92vw); border-left: 1px solid #ddd8cb; background: #faf9f4; box-shadow: -12px 0 32px #332f2510; }
+.web-snapshot-drawer header { display: flex; justify-content: space-between; align-items: start; gap: 12px; padding: 24px; border-bottom: 1px solid #e6e1d6; }
+.web-snapshot-drawer h2 { font-size: 20px; font-weight: 600; overflow-wrap: anywhere; }
+.web-snapshot-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 24px; }
+.web-snapshot-drawer footer { padding: 16px 24px; border-top: 1px solid #e6e1d6; }
+.web-snapshot-drawer footer p { margin-top: 8px; font-size: 12px; }
+.web-snapshot-meta { padding-bottom: 18px; border-bottom: 1px solid #e6e1d6; font-size: 12px; line-height: 1.9; color: #77736a; overflow-wrap: anywhere; }
+.web-snapshot-section { margin: 18px 0; scroll-margin-top: 16px; }
+.web-snapshot-section h3 { font-size: 16px; font-weight: 600; margin-bottom: 8px; }
+.web-snapshot-section p, .web-snapshot-section pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.9; }
+.web-snapshot-section pre { overflow-x: auto; background: #efeee8; padding: 12px; border-radius: 8px; }
+.selected-evidence { border-left: 3px solid #5d58ac; padding-left: 12px; background: #eeecf8; }
+
 :root {
   font-family: Inter, "Microsoft YaHei UI", "PingFang SC", sans-serif;
   color: #24231f;

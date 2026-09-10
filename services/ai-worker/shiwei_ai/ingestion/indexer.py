@@ -22,9 +22,10 @@ class DocumentIndexer:
         self.parser = DocumentParser()
         self.chunker = StructureAwareChunker()
 
-    def index_source(self, source_id: str, stored_path: Path, filename: str) -> dict[str, Any]:
+    def index_source(self, source_id: str, stored_path: Path, filename: str, *, document: CanonicalDocument | None = None, progress_sink=None) -> dict[str, Any]:
         try:
-            document = self.parser.parse(stored_path, filename)
+            if document is None:
+                document = self.parser.parse(stored_path, filename, progress_sink=progress_sink) if progress_sink is not None else self.parser.parse(stored_path, filename)
             drafts = self.chunker.chunk(document)
             if not drafts:
                 raise ValueError("文档中没有可建立索引的正文")
@@ -35,10 +36,19 @@ class DocumentIndexer:
             )
 
             with self.database.transaction() as connection:
+                source = connection.execute("SELECT source_type FROM sources WHERE id=?", (source_id,)).fetchone()
+                is_snapshot = source is not None and source["source_type"] == "web_page"
+                old_chunks = {}
+                saved_citations = []
                 existing = connection.execute(
                     "SELECT id FROM documents WHERE source_id = ?", (source_id,)
                 ).fetchone()
                 if existing is not None:
+                    if is_snapshot:
+                        # Immutable snapshots retain reference identities across local reindex.
+                        document_id = existing["id"]
+                        old_chunks = {(row["chunk_index"], row["content"]): row["id"] for row in connection.execute("SELECT id,chunk_index,content FROM chunks WHERE document_id=?", (document_id,))}
+                        saved_citations = [dict(row) for row in connection.execute("SELECT * FROM citations WHERE document_id=?", (document_id,))]
                     connection.execute(
                         "DELETE FROM chunks_fts WHERE document_id = ?", (existing["id"],)
                     )
@@ -94,7 +104,7 @@ class DocumentIndexer:
                     )
 
                 for draft in drafts:
-                    chunk_id = str(uuid4())
+                    chunk_id = old_chunks.get((draft.chunk_index, draft.content), str(uuid4()))
                     section_id = section_ids[draft.section_index]
                     chunk_search_text = build_search_text(document.title, draft.content)
                     values = (
@@ -125,6 +135,10 @@ class DocumentIndexer:
                         search_text=chunk_search_text, title=document.title,
                         filename=filename, headings=draft.heading_path or "",
                     )
+                for citation in saved_citations:
+                    if connection.execute("SELECT 1 FROM chunks WHERE id=?", (citation["chunk_id"],)).fetchone():
+                        columns = list(citation)
+                        connection.execute(f"INSERT INTO citations({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})", [citation[key] for key in columns])
                 connection.execute(
                     "UPDATE sources SET status = 'searchable', error = NULL WHERE id = ?",
                     (source_id,),
@@ -151,7 +165,7 @@ class LexicalSearch:
         self.database = database
 
     def search(self, query: str, limit: int = 20, *, source_type: str | None = None) -> list[dict[str, Any]]:
-        if source_type not in {None, "imported_file", "user_note"}:
+        if source_type not in {None, "imported_file", "user_note", "web_page"}:
             raise ValueError("无效的资料类型")
         normalized = query.strip()
         terms = search_terms(normalized)
@@ -238,6 +252,7 @@ class LexicalSearch:
                        s.original_filename,
                        s.original_path, s.stored_path,
                        s.imported_at, s.id AS source_id, s.source_type,
+                       s.original_url, s.final_url, s.captured_at, s.body_hash,
                        n.id AS note_id, n.created_at AS note_created_at,
                        n.updated_at AS note_updated_at
                 FROM chunks c
@@ -264,6 +279,10 @@ class LexicalSearch:
                 hit["importedAt"] = metadata["imported_at"]
                 hit["sourceId"] = metadata["source_id"]
                 hit["sourceType"] = metadata["source_type"]
+                hit["originalUrl"] = metadata["original_url"]
+                hit["finalUrl"] = metadata["final_url"]
+                hit["capturedAt"] = metadata["captured_at"]
+                hit["bodyHash"] = metadata["body_hash"]
                 hit["noteId"] = metadata["note_id"]
                 hit["noteCreatedAt"] = metadata["note_created_at"]
                 hit["noteUpdatedAt"] = metadata["note_updated_at"]

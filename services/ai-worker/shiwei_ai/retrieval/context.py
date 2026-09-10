@@ -26,6 +26,11 @@ class CitationContext:
     note_created_at: str | None = None
     note_updated_at: str | None = None
     mentioned_dates: tuple[str, ...] = ()
+    source_id: str | None = None
+    original_url: str | None = None
+    final_url: str | None = None
+    captured_at: str | None = None
+    body_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -99,6 +104,11 @@ class ContextBuilder:
                     stored_path=hit.get("storedPath"),
                     imported_at=hit.get("importedAt"),
                     source_type=str(hit.get("sourceType") or "imported_file"),
+                    source_id=hit.get("sourceId"),
+                    original_url=hit.get("originalUrl"),
+                    final_url=hit.get("finalUrl"),
+                    captured_at=hit.get("capturedAt"),
+                    body_hash=hit.get("bodyHash"),
                     note_id=hit.get("noteId"),
                     note_created_at=hit.get("noteCreatedAt"),
                     note_updated_at=hit.get("noteUpdatedAt"),

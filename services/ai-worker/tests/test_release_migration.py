@@ -63,13 +63,14 @@ def test_previous_release_upgrade_preserves_assets_notes_conversations_citations
 
 def test_failed_new_migration_rolls_back_and_keeps_original_data(tmp_path, monkeypatch):
     path, _, _ = old_library(tmp_path)
-    monkeypatch.setattr(storage, 'MIGRATIONS', storage.MIGRATIONS + ((7, 'ALTER TABLE notes ADD COLUMN temporary_field TEXT; INSERT INTO nonexistent VALUES (1);'),))
+    current_version = max(version for version, _ in storage.MIGRATIONS)
+    monkeypatch.setattr(storage, 'MIGRATIONS', storage.MIGRATIONS + ((current_version + 1, 'ALTER TABLE notes ADD COLUMN temporary_field TEXT; INSERT INTO nonexistent VALUES (1);'),))
     with pytest.raises(sqlite3.OperationalError):
         Database(path)
     c = sqlite3.connect(path)
     assert 'temporary_field' not in [r[1] for r in c.execute('PRAGMA table_info(notes)')]
     assert c.execute("SELECT content FROM notes").fetchone()[0] == '单次迁移38~50天'
-    assert c.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 6
+    assert c.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == current_version
     c.close()
 
 

@@ -7,7 +7,8 @@ import "../src/styles.css";
 
 Object.defineProperty(window, "isTauri", { value: true, configurable: true });
 mockWindows("main");
-const qaPort = new URLSearchParams(window.location.search).get("qaPort") === "1423" ? "1423" : "1422";
+const requestedQaPort = new URLSearchParams(window.location.search).get("qaPort");
+const qaPort = requestedQaPort && ["1422", "1423", "1427"].includes(requestedQaPort) ? requestedQaPort : "1422";
 mockIPC(
   async (command, args) => {
     if (command.startsWith("plugin:webview|")) return;
@@ -28,6 +29,8 @@ mockIPC(
       delete_note: "delete_note",
       list_sources: "list_sources",
       import_paths: "import_paths",
+      import_url: "import_url",
+      get_web_snapshot: "get_web_snapshot",
       delete_source: "delete_source",
       reindex_source: "reindex_source",
       search_lexical: "search_lexical",

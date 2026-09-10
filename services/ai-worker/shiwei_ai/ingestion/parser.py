@@ -2,14 +2,23 @@ from __future__ import annotations
 
 import csv
 import re
+from collections.abc import Callable
 from html.parser import HTMLParser
 from pathlib import Path
+from typing import Literal, TypedDict
 
 from shiwei_ai.ingestion.canonical import (
     CanonicalBlock,
     CanonicalDocument,
     CanonicalSection,
 )
+from shiwei_ai.ingestion.limits import MAX_PDF_PAGES
+
+
+class PdfProgress(TypedDict):
+    currentPage: int
+    totalPages: int
+    stage: Literal["reading", "ocr"]
 
 
 class ParseError(RuntimeError):
@@ -59,7 +68,12 @@ class DocumentParser:
     def __init__(self) -> None:
         self._ocr_engine = None
 
-    def parse(self, path: Path, original_filename: str) -> CanonicalDocument:
+    def parse(
+        self,
+        path: Path,
+        original_filename: str,
+        progress_sink: Callable[[PdfProgress], None] | None = None,
+    ) -> CanonicalDocument:
         suffix = path.suffix.lower()
         if suffix in {".md", ".txt"}:
             return self._parse_text(path, original_filename, markdown=suffix == ".md")
@@ -70,6 +84,8 @@ class DocumentParser:
         if suffix in {".png", ".jpg", ".jpeg", ".webp"}:
             return self._parse_image(path, original_filename)
         if suffix == ".pdf":
+            if progress_sink is not None:
+                return self._parse_pdf(path, original_filename, progress_sink=progress_sink)
             return self._parse_pdf(path, original_filename)
         return self._parse_with_docling(path, original_filename)
 
@@ -95,7 +111,12 @@ class DocumentParser:
         except Exception as error:
             raise ParseError("本地 OCR 识别失败，请检查文件是否清晰、完整") from error
 
-    def _parse_pdf(self, path: Path, original_filename: str) -> CanonicalDocument:
+    def _parse_pdf(
+        self,
+        path: Path,
+        original_filename: str,
+        progress_sink: Callable[[PdfProgress], None] | None = None,
+    ) -> CanonicalDocument:
         import pypdfium2 as pdfium
 
         try:
@@ -106,9 +127,12 @@ class DocumentParser:
             raise ParseError("无法打开 PDF，文件可能损坏或并非有效 PDF") from error
         sections: list[CanonicalSection] = []
         try:
-            if len(pdf) > 300:
-                raise ParseError("PDF 超过 300 页，请拆分后添加")
-            for index in range(len(pdf)):
+            total_pages = len(pdf)
+            if total_pages > MAX_PDF_PAGES:
+                raise ParseError(f"PDF 超过 {MAX_PDF_PAGES} 页，请拆分后添加")
+            for index in range(total_pages):
+                if progress_sink is not None:
+                    progress_sink({"currentPage": index + 1, "totalPages": total_pages, "stage": "reading"})
                 page = pdf[index]
                 try:
                     text_page = page.get_textpage()
@@ -118,10 +142,16 @@ class DocumentParser:
                         text_page.close()
                     kind = "paragraph"
                     if not text:
+                        if progress_sink is not None:
+                            progress_sink({"currentPage": index + 1, "totalPages": total_pages, "stage": "ocr"})
                         scale = min(2.0, 2400 / max(page.get_size()))
                         bitmap = page.render(scale=scale)
                         try:
-                            text = self._ocr_text(bitmap.to_pil())
+                            image = bitmap.to_pil()
+                            try:
+                                text = self._ocr_text(image)
+                            finally:
+                                image.close()
                         finally:
                             bitmap.close()
                         kind = "image_text"

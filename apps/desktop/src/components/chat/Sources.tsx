@@ -7,6 +7,8 @@ import {
   type SourceMatch,
 } from "../../lib/chat";
 import { Button } from "../ui/button";
+import { WebSnapshotContent, WebSnapshotDrawer } from "../WebSources";
+import { openWebSource } from "../../lib/import";
 
 export function CitationChip({
   citation,
@@ -20,13 +22,13 @@ export function CitationChip({
       className="chat-citation"
       onClick={() => onSelect(citation)}
       title={
-        citation.pageNumber
+        citation.sourceType !== "web_page" && citation.pageNumber
           ? `第 ${citation.pageNumber} 页 · 查看原文`
           : "查看原文"
       }
     >
       [{citation.citationId}] {citation.sourceFilename}
-      {citation.pageNumber && (
+      {citation.sourceType !== "web_page" && citation.pageNumber && (
         <span className="text-muted"> · 第 {citation.pageNumber} 页</span>
       )}
     </button>
@@ -45,6 +47,7 @@ export function SourceMatchCard({
   onOpenNote?: (noteId: string) => void;
 }) {
   const [error, setError] = useState("");
+  const [showSnapshot, setShowSnapshot] = useState(false);
   const open = async (reveal = false) => {
     setError("");
     try {
@@ -66,6 +69,8 @@ export function SourceMatchCard({
           <p className="mt-1 text-xs text-muted">
             笔记 · 更新于 {new Date(source.noteUpdatedAt ?? source.importedAt).toLocaleDateString("zh-CN")}
           </p>
+        ) : source.sourceType === "web_page" ? (
+          <p className="mt-1 truncate text-xs text-muted" title={source.originalUrl}>网页 · {source.originalUrl}</p>
         ) : (
           <p
             className="mt-1 truncate text-xs text-muted"
@@ -84,6 +89,8 @@ export function SourceMatchCard({
               <NotebookPen size={14} />
               打开这条笔记
             </button>
+          ) : source.sourceType === "web_page" ? (
+            <><button onClick={() => setShowSnapshot(true)} className="chat-text-action">查看已保存内容</button><button onClick={() => void openWebSource(source.sourceId).catch(() => setError("无法打开原网页，请稍后重试。"))} className="chat-text-action"><ExternalLink size={14}/>打开原网页</button></>
           ) : (
             <>
               <button onClick={() => void open()} className="chat-text-action">
@@ -110,6 +117,7 @@ export function SourceMatchCard({
           </p>
         )}
       </div>
+      {showSnapshot && <WebSnapshotDrawer sourceId={source.sourceId} title={source.filename} onClose={() => setShowSnapshot(false)}/>}
     </div>
   );
 }
@@ -179,7 +187,7 @@ export function SourcePanel({
       <header>
         <div className="min-w-0">
           <p className="text-xs font-medium text-indigo">
-            [{citation.citationId}] {citation.sourceType === "user_note" ? "笔记出处" : "原始出处"}
+            [{citation.citationId}] {citation.sourceType === "user_note" ? "笔记出处" : citation.sourceType === "web_page" ? "网页出处" : "原始出处"}
           </p>
           <h2 className="mt-2 break-words font-semibold">
             {citation.sourceFilename}
@@ -195,6 +203,7 @@ export function SourcePanel({
         </button>
       </header>
       <div className="chat-source-body">
+        {citation.sourceType === "web_page" ? citation.sourceId ? <WebSnapshotContent sourceId={citation.sourceId} focusChunkId={citation.chunkId} headingPath={citation.headingPath} snippet={citation.snippet}/> : <><p className="text-xs text-muted">已验证的网页原文片段</p><blockquote className="whitespace-pre-wrap">{citation.snippet}</blockquote><p className="muted">这条历史引用缺少快照标识，请在资料页查看已保存内容。</p></> : <>
         <div className="flex flex-wrap gap-2 text-xs text-muted">
           {citation.pageNumber && <span>第 {citation.pageNumber} 页</span>}
           {citation.sheetName && <span>工作表 {citation.sheetName}</span>}
@@ -229,6 +238,7 @@ export function SourcePanel({
             )}
           </details>
         )}
+        </>}
       </div>
       <footer>
         {error && (
@@ -246,7 +256,7 @@ export function SourcePanel({
             <NotebookPen size={14} />
             打开这条笔记
           </Button>
-        ) : (
+        ) : citation.sourceType === "web_page" ? <Button variant="secondary" disabled={!citation.sourceId} onClick={() => { if (citation.sourceId) void openWebSource(citation.sourceId).catch(() => setError("无法打开原网页，请稍后重试。")); }}><ExternalLink size={14}/>打开原网页</Button> : (
           <div className="flex flex-wrap gap-2">
             <Button
               onClick={() => void open(false)}

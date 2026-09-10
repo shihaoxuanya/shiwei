@@ -51,7 +51,7 @@ def test_database_enables_wal_foreign_keys_and_versions_schema(tmp_path: Path) -
 
     assert journal_mode.lower() == "wal"
     assert foreign_keys == 1
-    assert [row[0] for row in versions] == [1, 2, 3, 4, 5, 6]
+    assert [row[0] for row in versions] == [1, 2, 3, 4, 5, 6, 7]
 
 
 def test_interrupted_running_jobs_are_marked_failed(tmp_path: Path) -> None:

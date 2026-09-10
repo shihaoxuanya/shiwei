@@ -16,7 +16,7 @@ export type LexicalHit = {
   slideNumber?: number;
 };
 
-export async function searchLocal(query: string, limit = 20, sourceType?: "imported_file"): Promise<LexicalHit[]> {
+export async function searchLocal(query: string, limit = 20, sourceType?: "imported_file" | "web_page"): Promise<LexicalHit[]> {
   if (!isTauri()) return [];
   return invoke<LexicalHit[]>("search_lexical", sourceType ? { query, limit, sourceType } : { query, limit });
 }
