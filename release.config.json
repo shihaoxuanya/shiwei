@@ -2,9 +2,5 @@
   "channel": "stable",
   "sourceRepository": "shihaoxuanya/shiwei",
   "artifactRepository": "shihaoxuanya/shiwei-releases",
-  "controlPlaneOrigin": "https://zhishimanghe.com",
-  "updaterEndpoint": "https://zhishimanghe.com/api/v1/updates/check?current_version={{current_version}}&channel=stable",
-  "updaterPublicKey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIzRUQ4QTQxRDFFN0Q1RDcKUldUWDFlZlJRWXJ0czNsdCtEZmF6RkJwL2tGcUVLZnM0ZHpSd3djTTBLVkhjVStWb001WnBQYlAK",
-  "analyticsHost": "https://zhishimanghe.com",
-  "analyticsKey": ""
+  "updaterPublicKey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIzRUQ4QTQxRDFFN0Q1RDcKUldUWDFlZlJRWXJ0czNsdCtEZmF6RkJwL2tGcUVLZnM0ZHpSd3djTTBLVkhjVStWb001WnBQYlAK"
 }

@@ -1,6 +1,4 @@
-mod analytics;
 mod provider_store;
-mod updates;
 mod worker_client;
 mod library_location;
 
@@ -14,34 +12,6 @@ use worker_client::{WorkerClient, WorkerError};
 
 #[derive(Clone)]
 struct WorkerState(Arc<WorkerClient>);
-
-#[tauri::command]
-fn release_status(
-    app: tauri::AppHandle,
-    state: State<'_, Arc<analytics::AnalyticsService>>,
-) -> serde_json::Value {
-    serde_json::json!({"version": env!("CARGO_PKG_VERSION"), "channel":"stable", "updaterConfigured": updates::configured(&app), "analytics":state.status()})
-}
-#[tauri::command]
-fn analytics_consent(
-    state: State<'_, Arc<analytics::AnalyticsService>>,
-    enabled: bool,
-) -> Result<(), String> {
-    let previous = state.status().enabled;
-    state.set_enabled(enabled)?;
-    if enabled && !previous {
-        state.inner().opened();
-    }
-    Ok(())
-}
-#[tauri::command]
-fn analytics_track(
-    state: State<'_, Arc<analytics::AnalyticsService>>,
-    event: String,
-    properties: serde_json::Value,
-) {
-    state.inner().track(&event, properties);
-}
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -192,12 +162,6 @@ async fn import_paths(
     state: State<'_, WorkerState>,
     paths: Vec<String>,
 ) -> Result<ImportReport, String> {
-    let analytics = app
-        .state::<Arc<analytics::AnalyticsService>>()
-        .inner()
-        .clone();
-    analytics.track("import_started", serde_json::json!({}));
-    let started = std::time::Instant::now();
     let client = state.0.clone();
     let event_app = app.clone();
     let result: Result<ImportReport, String> = tauri::async_runtime::spawn_blocking(move || {
@@ -216,29 +180,6 @@ async fn import_paths(
     .await
     .map_err(|error| format!("导入任务异常：{error}"))?
     .map_err(|error| error.user_message());
-    match &result {
-        Ok(report) => {
-            let n = report.summary.imported + report.summary.skipped + report.summary.failed;
-            let bucket = if n <= 1 {
-                "1"
-            } else if n <= 10 {
-                "2-10"
-            } else if n <= 100 {
-                "11-100"
-            } else {
-                "100+"
-            };
-            let metrics = serde_json::json!({"file_count_bucket": bucket, "success_count": report.summary.imported, "failure_count": report.summary.failed, "duration_ms": started.elapsed().as_millis().min(86_400_000) as u64});
-            // A completed all-failure batch is not a successful first import.
-            if report.summary.imported > 0 {
-                analytics.track("import_completed", metrics.clone());
-            }
-            if report.summary.failed > 0 {
-                analytics.track("import_failed", metrics);
-            }
-        }
-        Err(_) => analytics.track("import_failed", serde_json::json!({"failure_count": 1})),
-    }
     result
 }
 
@@ -276,10 +217,10 @@ async fn get_web_snapshot(state: State<'_, WorkerState>, source_id: String) -> R
         .await.map_err(|_| "读取网页快照失败。".to_string())?.map_err(|e| e.user_message())
 }
 
-fn validate_web_url(value: &str) -> Result<reqwest::Url, String> {
+fn validate_web_url(value: &str) -> Result<url::Url, String> {
     let invalid = || "请输入有效的 HTTP 或 HTTPS 网页地址，不要包含账号密码。".to_string();
     if value.len() > 8192 || value.chars().any(char::is_control) { return Err(invalid()); }
-    let url = reqwest::Url::parse(value).map_err(|_| invalid())?;
+    let url = url::Url::parse(value).map_err(|_| invalid())?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() { return Err(invalid()); }
     Ok(url)
 }
@@ -454,14 +395,6 @@ async fn chat_ask(
     if uuid::Uuid::parse_str(&request_id).is_err() {
         return Err("对话请求标识无效".into());
     }
-    let analytics = app
-        .state::<Arc<analytics::AnalyticsService>>()
-        .inner()
-        .clone();
-    analytics.track(
-        "question_asked",
-        serde_json::json!({"conversation_mode":"knowledge_first"}),
-    );
     let client = state.0.clone();
     let event_app = app.clone();
     let result: Result<serde_json::Value, String> = tauri::async_runtime::spawn_blocking(move || {
@@ -485,19 +418,6 @@ async fn chat_ask(
     .await
     .map_err(|error| format!("回答任务异常：{error}"))?
     .map_err(|error| error.user_message());
-    if let Ok(answer) = &result {
-        let kind = answer["answerKind"].as_str();
-        if kind == Some("knowledge")
-            && answer["citations"]
-                .as_array()
-                .is_some_and(|a| !a.is_empty())
-        {
-            // Worker has already applied relevance/evidence gates and validated citation IDs.
-            analytics.track("retrieval_succeeded", serde_json::json!({}));
-        } else if kind == Some("not_found") {
-            analytics.track("retrieval_abstained", serde_json::json!({}));
-        }
-    }
     result
 }
 
@@ -594,7 +514,6 @@ async fn get_note(
 
 #[tauri::command]
 async fn create_note(
-    app: tauri::AppHandle,
     state: State<'_, WorkerState>,
 ) -> Result<serde_json::Value, String> {
     let client = state.0.clone();
@@ -604,10 +523,6 @@ async fn create_note(
     .await
     .map_err(|error| format!("新建笔记任务异常：{error}"))?
     .map_err(|error| error.user_message());
-    if result.is_ok() {
-        app.state::<Arc<analytics::AnalyticsService>>()
-            .track("note_created", serde_json::json!({}));
-    }
     result
 }
 
@@ -714,25 +629,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(updates::UpdateState::default())
         .manage(WorkerState(worker))
         .setup(move |app| {
             let location_path = library_location::config_path(app.handle())
                 .map_err(std::io::Error::other)?;
             startup_worker.set_location_config(location_path)?;
-            // Release metadata is separate from the user's knowledge DB; failures are fail-closed.
-            let path = app
-                .path()
-                .app_local_data_dir()
-                .ok()
-                .map(|path| path.join("installation.json"));
-            app.manage(analytics::initialize(path));
-            let previous_hook = std::panic::take_hook();
-            std::panic::set_hook(Box::new(move |info| {
-                analytics::report_error("rust_panic", "desktop");
-                previous_hook(info);
-            }));
             if let Err(error) = startup_worker.start() {
                 eprintln!("拾微 Worker 启动失败，将在首次调用时重试：{error}");
             }
@@ -751,11 +652,6 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            release_status,
-            analytics_consent,
-            analytics_track,
-            updates::update_check,
-            updates::update_install,
             worker_ping,
             worker_info,
             library_relocate,
@@ -801,12 +697,6 @@ impl WorkerError {
                 return message.clone(); // User-requested stop is not an error statistic.
             }
         }
-        let kind = match self {
-            WorkerError::Exited => "worker_exited",
-            WorkerError::Timeout => "worker_timeout",
-            _ => "worker_error",
-        };
-        analytics::report_error(kind, "worker_client");
         match self {
             WorkerError::ExecutableNotFound => {
                 "未找到拾微 AI Worker 运行环境，请重新安装应用".to_string()

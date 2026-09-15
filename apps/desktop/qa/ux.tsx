@@ -12,8 +12,6 @@ const qaPort = requestedQaPort && ["1422", "1423", "1427"].includes(requestedQaP
 mockIPC(
   async (command, args) => {
     if (command.startsWith("plugin:webview|")) return;
-    if (command === "analytics_track") return; // QA never reports production statistics.
-    if (command === "update_check") return { status: "unconfigured" };
     const map: Record<string, string> = {
       worker_ping: "ping",
       worker_info: "worker_info",
@@ -38,8 +36,6 @@ mockIPC(
       provider_status: "provider_status",
       index_status: "index_status",
       chat_cancel: "cancel_chat",
-      release_status: "qa_release_status",
-      analytics_consent: "qa_analytics_consent",
       "plugin:dialog|open": "qa_fixture_paths",
     };
     if (!map[command])

@@ -61,7 +61,7 @@ def main():
         return server
 
     server = executor.submit(initialize).result()
-    methods = {"ping", "worker_info", "chat", "cancel_chat", "get_conversation", "delete_conversation", "list_conversations", "list_sources", "import_paths", "import_url", "get_web_snapshot", "delete_source", "reindex_source", "search_lexical", "search_hybrid", "list_notes", "get_note", "create_note", "update_note", "index_note", "delete_note", "provider_status", "index_status", "qa_fixture_paths", "qa_release_status", "qa_analytics_consent"}
+    methods = {"ping", "worker_info", "chat", "cancel_chat", "get_conversation", "delete_conversation", "list_conversations", "list_sources", "import_paths", "import_url", "get_web_snapshot", "delete_source", "reindex_source", "search_lexical", "search_hybrid", "list_notes", "get_note", "create_note", "update_note", "index_note", "delete_note", "provider_status", "index_status", "qa_fixture_paths"}
     # Mirror a fresh production installation's disclosed default, but remain
     # entirely in memory: this QA bridge has no analytics sender or endpoint.
     consent = {"enabled": True, "choice": "enabled", "needsChoice": False}
@@ -118,12 +118,6 @@ def main():
                 server._event_sink = emit
                 if method == "qa_fixture_paths":
                     emit({"result": manifest})
-                    return
-                if method in {"qa_release_status", "qa_analytics_consent"}:
-                    if method == "qa_analytics_consent":
-                        enabled = params.get("enabled") is True
-                        consent.update(enabled=enabled, choice="enabled" if enabled else "disabled", needsChoice=False)
-                    emit({"result": {"version": version, "channel": "local-qa", "updaterConfigured": False, "analytics": {**consent, "configured": False}}})
                     return
                 if method == "chat":
                     params["stream"] = True

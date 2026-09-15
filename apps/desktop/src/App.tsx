@@ -4,7 +4,6 @@ import { ChatPage } from "./components/chat/ChatPage";
 export { ChatPage } from "./components/chat/ChatPage";
 export { CitationChip, SourceMatchCard } from "./components/chat/Sources";
 import { SettingsPage } from "./components/SettingsPage";
-import { ReleaseInfrastructure } from "./components/ReleaseInfrastructure";
 import { HomePage, LibraryPage } from "./components/LibraryPages";
 import { useWorkerStore } from "./stores/worker-store";
 import { useImportStore } from "./stores/import-store";
@@ -68,7 +67,6 @@ export default function App() {
     ...sources.filter(s => s.status === "searchable").map(s => ({id:s.id,title:s.filename,kind:"file" as const})),
   ];
   return <div className="app-shell" inert={relocating || undefined}>
-    <ReleaseInfrastructure flushNotes={async () => { if (isLibraryRelocating()) throw new Error("资料库正在迁移"); await notesRef.current?.flush(); }} />
     <aside className="app-sidebar">
       <button className="brand" onClick={() => void navigate("home")} aria-label="拾微首页">
         <span className="brand-mark">拾</span><span><strong>拾微</strong><small>SHIWEI</small></span>

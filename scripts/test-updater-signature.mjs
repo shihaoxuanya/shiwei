@@ -26,12 +26,8 @@ try {
   if (!existsSync(verifier)) throw new Error('Build the verify-update example first');
   const verify = () => spawnSync(verifier, [artifact, artifact + '.sig', config], { encoding: 'utf8', windowsHide: true }).status;
   if (verify() !== 0) throw new Error('Correct signature was rejected');
-  const controlPython = process.env.SHIWEI_CONTROL_PYTHON;
-  const verifyControl = () => spawnSync(controlPython, ['-m', 'shiwei_control.verify_cli', artifact, artifact + '.sig', config], { encoding: 'utf8', windowsHide: true }).status;
-  if (controlPython && verifyControl() !== 0) throw new Error('Control plane rejected official Tauri signature');
   writeFileSync(artifact, 'Tampered update');
   if (verify() === 0) throw new Error('Tampered update was accepted');
-  if (controlPython && verifyControl() === 0) throw new Error('Control plane accepted tampered update');
   console.log('Official Tauri signing round trip passed; tampered artifact rejected. Ephemeral keys are discarded.');
 } finally {
   const parent = resolve(tmpdir()) + sep;

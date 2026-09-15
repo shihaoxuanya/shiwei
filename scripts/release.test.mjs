@@ -4,27 +4,6 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseVersion, validateVersion, root } from './version.mjs';
 import { artifactBaseUrl, releaseNotes, updateMetadata, validateArtifactDirectory } from './release-artifacts.mjs';
-import { notifyReady } from './notify-release.mjs';
-test('CI only registers READY, authenticates and refuses redirects', async () => {
-  let calls = 0;
-  await notifyReady('https://zhishimanghe.com', 'test-only', { version: '0.3.1' }, async (url, options) => {
-    calls++;
-    assert.equal(url.pathname, '/internal/releases/artifact-ready');
-    assert.equal(options.headers.Authorization, 'Bearer test-only');
-    assert.equal(options.redirect, 'error');
-    assert.deepEqual(JSON.parse(options.body), { version: '0.3.1' });
-    return Response.json({ version: '0.3.1', status: 'READY' });
-  });
-  assert.equal(calls, 1);
-});
-test('CI registration rejects unsafe origins and cannot claim failed registration is READY', async () => {
-  for (const origin of ['http://zhishimanghe.com', 'https://user:pass@example.com', 'https://example.com/path', 'https://example.com/?token=x']) {
-    await assert.rejects(notifyReady(origin, 'test-only', {}, () => assert.fail('must not request')));
-  }
-  await assert.rejects(notifyReady('https://example.com', '', {}, () => assert.fail('must not request')));
-  await assert.rejects(notifyReady('https://example.com', 'test-only', { version: '0.3.1' }, async () => new Response(null, { status: 401 })));
-  await assert.rejects(notifyReady('https://example.com', 'test-only', { version: '0.3.1' }, async () => Response.json({ version: '0.3.1', status: 'PUBLISHED' })));
-});
 test('split repository artifacts never fall back to the private source repository', () => {
   const config = JSON.parse(readFileSync(resolve(root, 'release.config.json'), 'utf8'));
   assert.equal(artifactBaseUrl(config, { GITHUB_REPOSITORY: config.sourceRepository }, '0.3.1'), 'https://github.com/shihaoxuanya/shiwei-releases/releases/download/v0.3.1');
@@ -56,14 +35,11 @@ test('official metadata requires HTTPS, stable version, and embedded signature c
   assert.equal(result.platforms['windows-x86_64'].signature, sig);
   for (const [version, url, signature] of [['0.4.0-beta.2', 'https://example.com/a', sig], ['0.3.0', 'http://example.com/a', sig], ['0.3.0', 'https://example.com/a', 'bad']]) assert.throws(() => updateMetadata(version, url, signature, '更新'));
 });
-test('release config uses first-party HTTPS analytics without embedded secrets', () => {
+test('release config contains no backend endpoints or telemetry', () => {
   const config = JSON.parse(readFileSync(resolve(root, 'release.config.json'), 'utf8'));
-  assert.equal(config.channel, 'stable');
-  assert.ok(!('privateKey' in config));
-  assert.equal(new URL(config.analyticsHost).origin, config.controlPlaneOrigin);
-  assert.equal(new URL(config.analyticsHost).protocol, 'https:');
-  assert.equal(config.analyticsKey, '');
-  assert.ok(!('analyticsSalt' in config));
+  for (const key of ['privateKey', 'controlPlaneOrigin', 'updaterEndpoint', 'analyticsHost', 'analyticsKey']) assert.ok(!(key in config));
+  const native = readFileSync(resolve(root, 'apps/desktop/src-tauri/src/lib.rs'), 'utf8');
+  assert.doesNotMatch(native, /analytics::|updates::|tauri_plugin_updater/);
 });
 test('release staging refuses stale installers and unexpected uploads', () => {
   validateArtifactDirectory(['Shiwei_0.3.0_x64-setup.exe', 'latest.json'], '0.3.0');

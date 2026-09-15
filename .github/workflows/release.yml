@@ -23,10 +23,7 @@ jobs:
       CARGO_INCREMENTAL: '0'
       RELEASE_TAG: ${{ github.ref_name }}
       SHIWEI_RELEASE_REPOSITORY: shihaoxuanya/shiwei-releases
-      SHIWEI_UPDATER_ENDPOINT: ${{ vars.SHIWEI_UPDATER_ENDPOINT }}
       SHIWEI_UPDATER_PUBLIC_KEY: ${{ vars.SHIWEI_UPDATER_PUBLIC_KEY }}
-      SHIWEI_ANALYTICS_HOST: ${{ vars.SHIWEI_ANALYTICS_HOST }}
-      SHIWEI_ANALYTICS_KEY: ${{ vars.SHIWEI_ANALYTICS_KEY }}
       SHIWEI_WINDOWS_SIGN_COMMAND: ${{ vars.SHIWEI_WINDOWS_SIGN_COMMAND }}
     steps:
       - uses: actions/checkout@v4
@@ -49,11 +46,9 @@ jobs:
       - name: Validate public artifact repository access
         env:
           GH_TOKEN: ${{ secrets.SHIWEI_RELEASE_REPOSITORY_TOKEN }}
-          SHIWEI_RELEASE_PUBLISH_TOKEN: ${{ secrets.SHIWEI_RELEASE_PUBLISH_TOKEN }}
         shell: pwsh
         run: |
           if (-not $env:GH_TOKEN) { throw 'Missing protected cross-repository release token' }
-          if (-not $env:SHIWEI_RELEASE_PUBLISH_TOKEN) { throw 'Missing protected READY registration token' }
           $repo = gh api "repos/$env:SHIWEI_RELEASE_REPOSITORY" | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or $repo.private -ne $false -or $repo.permissions.push -ne $true) { throw 'Public artifact repository write access required' }
       # Optional Authenticode integration point: install the certificate provider's
@@ -73,8 +68,7 @@ jobs:
           $file = "output/release/artifacts/Shiwei_${version}_x64-setup.exe"
           cargo run --manifest-path apps/desktop/src-tauri/Cargo.toml --example verify-update -- "$file" "$file.sig" output/release/tauri.release.json
           if ($LASTEXITCODE -ne 0) { throw 'Signature does not match the embedded public key' }
-      # Public artifact availability is not authorization for client rollout.
-      # Only the control plane can select a READY version for distribution.
+      # GitHub hosts signed installers for explicit manual downloads.
       - name: Upload signed assets to the public artifact repository
         env:
           GH_TOKEN: ${{ secrets.SHIWEI_RELEASE_REPOSITORY_TOKEN }}
@@ -97,7 +91,3 @@ jobs:
           }
           gh release edit "$env:RELEASE_TAG" --repo "$env:SHIWEI_RELEASE_REPOSITORY" --draft=false --latest=false
           if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
-      - name: Register verified artifact as READY (never start rollout)
-        env:
-          SHIWEI_RELEASE_PUBLISH_TOKEN: ${{ secrets.SHIWEI_RELEASE_PUBLISH_TOKEN }}
-        run: node scripts/notify-release.mjs

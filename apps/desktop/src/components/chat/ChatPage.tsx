@@ -24,7 +24,6 @@ import {
   X,
 } from "lucide-react";
 import { type AnswerKind, type Citation } from "../../lib/chat";
-import { analytics } from "../../lib/analytics";
 import { createChatWorkspace } from "../../stores/chat-workspace";
 import { Button } from "../ui/button";
 import { CopyButton, MessageContent } from "./MessageContent";
@@ -102,7 +101,7 @@ export function ChatPage({
   const historyTrigger = useRef<HTMLButtonElement | null>(null);
   const dialog = useRef<HTMLDivElement>(null);
   const closeSource = useCallback(() => setCitation(null), []);
-  const selectCitation = useCallback((value: Citation) => { setCitation(value); analytics.track("citation_clicked"); }, []);
+  const selectCitation = useCallback((value: Citation) => { setCitation(value); }, []);
   const busyHere = state.pending?.key === state.selected;
   const busyElsewhere = state.pending && !busyHere;
   const canSend =

@@ -116,7 +116,7 @@ it("keeps the form usable when a service has no model-list API", async () => {
 it("does not present an obsolete body-only embedding index as active", async () => {
   vi.mocked(api.getIndexStatus).mockResolvedValue({ chunkCount: 2, model: "old-embedding", needsRebuild: true, searchTextVersion: 0 });
   render(<SettingsPage />);
-  fireEvent.click(screen.getByRole("tab", { name: "关于与更新" }));
+  fireEvent.click(screen.getByRole("tab", { name: "关于" }));
   fireEvent.click(screen.getByText("技术详情"));
   expect(await screen.findByText("需更新，当前使用本地全文检索")).toBeInTheDocument();
   expect(screen.queryByText("old-embedding")).not.toBeInTheDocument();
@@ -177,8 +177,8 @@ it("preserves unsaved fields while switching settings sections and supports keyb
   fireEvent.click(screen.getByRole("tab", { name: "AI 服务" }));
   expect(screen.getByLabelText("对话 API Key")).toHaveValue("unsaved-key");
   rerender(<SettingsPage initialSection="about" sectionRequestKey="diagnostic-click" />);
-  expect(screen.getByRole("tab", { name: "关于与更新" })).toHaveAttribute("aria-selected", "true");
-  expect(screen.getByText("当前内测版暂不支持在线更新。")).toBeVisible();
+  expect(screen.getByRole("tab", { name: "关于" })).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByRole("button", { name: "前往 GitHub 下载" })).toBeVisible();
 });
 
 it("requires explicit confirmation before clearing a saved key", async () => {

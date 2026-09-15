@@ -13,7 +13,6 @@ vi.mock("./components/notes/NotesPage", () => ({
 }));
 vi.mock("./components/chat/ChatPage", () => ({ ChatPage: () => <div>对话内容</div> }));
 vi.mock("./components/SettingsPage", () => ({ SettingsPage: () => <div>设置内容</div> }));
-vi.mock("./components/ReleaseInfrastructure", () => ({ ReleaseInfrastructure: () => null }));
 vi.mock("./components/LibraryPages", () => ({ HomePage: () => <div>首页内容</div>, LibraryPage: () => <div>资料内容</div> }));
 vi.mock("./lib/notes", () => ({ listNotes: vi.fn(async () => []) }));
 vi.mock("./lib/import", () => ({ listSources: vi.fn(async () => []) }));

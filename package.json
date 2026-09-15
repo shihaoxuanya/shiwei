@@ -26,5 +26,6 @@
     "test:python": "uv run --project services/ai-worker pytest services/ai-worker/tests",
     "test:rust": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml",
     "test": "pnpm test:release && pnpm test:frontend && pnpm test:python && pnpm test:rust"
-  }
+  },
+  "license": "MIT"
 }
