@@ -56,4 +56,4 @@ TypeScript 类型检查与 Vite 生产构建通过。Python 和 Rust 测试分�
 
 ## 边界
 
-本版不包含文件夹、标签、双向链接、Markdown 高级编辑、Block Editor、模板、知识图谱、Canvas、插件或协作。笔记是本机纯文本记忆入口，不是 Obsidian/Notion 替代品。安装包仍未代码签名。
+本版不包含文件夹、标签、双向链接、Markdown 高级编辑、Block Editor、模板、知识图谱、Canvas、插件或协作。笔记是本机纯文本记忆入口。
