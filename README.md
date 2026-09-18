@@ -91,3 +91,5 @@ Worker 默认资料库在 Windows 用户本地应用目录的 `Shiwei/data`，�
 
 版本真值为 `VERSION`。通过 `pnpm run version <版本号>` 同步后提交并打 `v<版本号>` 标签，CI 测试、构建并签名，将安装包发布到 GitHub。
 保留离线安装包签名，不再向后台登记或推送更新。详见 [发布手册](docs/RELEASING.md)。历史验收文档描述旧版本，不代表当前后台或统计功能仍然存在。
+## 贡献者
+感谢 [rosyrongrong](https://github.com/rosyrongrong) 参与项目共创。
